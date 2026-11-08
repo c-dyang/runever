@@ -37,6 +37,48 @@ namespace RunEverCs.Services
                 if (!Ok) return "刷新失败：" + Message;
                 return Build.ToString() + " 缓存条目=" + CacheCount + " 后端=" + Backend;
             }
+
+            /// <summary>
+            /// 给人看的结果（B4b-7）：**不出现任何 .NET 类型名/字段名**。
+            /// 原来设置页直接 `r.ToString()`，弹出来的是 `RunEverCs.Services.PathCacheRefresh+Result`
+            /// —— 用户完全看不懂发生了什么。
+            /// </summary>
+            public string HumanSummary()
+            {
+                if (!Ok)
+                {
+                    return "没能刷新路径缓存。\n\n原因：" + Message
+                        + (string.IsNullOrEmpty(Backend) ? "" : "\n搜索后端：" + Backend)
+                        + "\n\n（详情见 state\\runever-cs.log）";
+                }
+
+                var b = Build;
+                var sb = new System.Text.StringBuilder();
+                sb.Append("路径缓存已更新。\n\n");
+                if (b != null)
+                {
+                    sb.Append("· 本次新解析成功：").Append(b.Resolved).Append(" 个程序\n");
+                    sb.Append("· 已缓存且文件还在（跳过）：").Append(b.Skipped).Append(" 个\n");
+                    sb.Append("· 没解析到（本机可能没装）：").Append(b.Failed).Append(" 个");
+                    if (b.Failed > 0 && b.FailedList.Count > 0)
+                    {
+                        sb.Append("（");
+                        int n = Math.Min(5, b.FailedList.Count);
+                        for (int i = 0; i < n; i++)
+                        {
+                            if (i > 0) sb.Append("、");
+                            sb.Append(b.FailedList[i]);
+                        }
+                        if (b.FailedList.Count > n) sb.Append(" 等");
+                        sb.Append("）");
+                    }
+                    sb.Append('\n');
+                }
+                sb.Append("· 缓存文件现在共：").Append(CacheCount).Append(" 条\n");
+                sb.Append("\n搜索后端：").Append(string.IsNullOrEmpty(Backend) ? "未知" : Backend);
+                if (!string.IsNullOrEmpty(BackendReason)) sb.Append("（").Append(BackendReason).Append("）");
+                return sb.ToString();
+            }
         }
 
         public static Result Run(string root, Action<string> log)
@@ -45,14 +87,47 @@ namespace RunEverCs.Services
         }
 
         /// <summary>
-        /// 刷新路径缓存。
+        /// 单飞闸（B4b-7）：托盘「刷新路径缓存」与设置页「立即刷新」都在改同一份
+        /// <c>cache\paths.txt</c>，两边同时跑会互相覆盖（后写的赢，先写的白干）。
+        /// 这里用进程级互斥保证「同一时刻只允许一个刷新」，第二个调用方拿到
+        /// <c>Ok=false</c> + 一句人话原因，而不是排队等。
+        /// </summary>
+        private static int _running;
+
+        /// <summary>是否已有一次刷新在跑（UI 用它提前把按钮置灰 / 给提示）。</summary>
+        public static bool IsRunning
+        {
+            get { return System.Threading.Volatile.Read(ref _running) != 0; }
+        }
+
+        public static Result Run(string root, Action<string> log, PathCache into)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            {
+                var busy = new Result();
+                busy.Ok = false;
+                busy.Message = "已经有一次刷新正在进行中，请等它结束（同一时刻只允许一个）";
+                return busy;
+            }
+            try
+            {
+                return RunCore(root, log, into);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _running, 0);
+            }
+        }
+
+        /// <summary>
+        /// 刷新路径缓存（真正干活的部分；对外只用带单飞闸的 `Run`）。
         /// ★ v8 回灌单一入口（T6/AC-8）：`into` 传入**运行实例的 PathCache** 时，
         ///   构建结果**就地**写进同一实例（`PathCacheBuilder.Build` 内部 Set + 原子 Save），
         ///   于是图标解析器与执行器（持有同一引用）立刻看到新缓存 —— 修掉原 gap①
         ///   （旧实现新建 PathCache 实例落盘，运行期永远看不到）。
         ///   `into = null` 时保持既有行为（CLI / 一次性进程用）。
         /// </summary>
-        public static Result Run(string root, Action<string> log, PathCache into)
+        private static Result RunCore(string root, Action<string> log, PathCache into)
         {
             var r = new Result();
             Action<string> lg = log ?? (s => { });

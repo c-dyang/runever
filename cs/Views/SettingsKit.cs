@@ -33,9 +33,19 @@ namespace RunEverCs.Views
         /// 把 WPF 按键映射成 menus.conf / auto.conf 的单字符热键。
         /// 返回 null = 该键不参与（修饰键 / 无对应字符）。
         /// 供「菜单项编辑器」和「触发与行为页」共用。
+        ///
+        /// ★ B4b-4：补上 **F1–F24**（返回 "F1".."F24" 这类**键名**，不是字符）——
+        ///   `HotkeySpec` 本来就把 F1-F24 / Space 当"命名键"解析（见其 NamedKeys），
+        ///   只有这个映射表漏了，于是设置页承诺能用 F 键、实际按 F8 毫无反应。
+        /// ★ 空格返回 "Space"（命名键）而不是字面空格：字面空格过一遍 `Trim()` 就没了，
+        ///   而且输入框里一个空格看不出是"空格"还是"没填"。
         /// </summary>
         public static string KeyToHotkeyChar(System.Windows.Input.Key key)
         {
+            // F1..F24：Key 枚举里是连续区间，直接算序号
+            if (key >= System.Windows.Input.Key.F1 && key <= System.Windows.Input.Key.F24)
+                return "F" + ((int)key - (int)System.Windows.Input.Key.F1 + 1);
+
             if (key >= System.Windows.Input.Key.A && key <= System.Windows.Input.Key.Z)
                 return ((char)('A' + (key - System.Windows.Input.Key.A))).ToString().ToLowerInvariant();
             if (key >= System.Windows.Input.Key.D0 && key <= System.Windows.Input.Key.D9)
@@ -53,9 +63,22 @@ namespace RunEverCs.Views
                 case System.Windows.Input.Key.OemComma: return ",";
                 case System.Windows.Input.Key.OemPeriod: return ".";
                 case System.Windows.Input.Key.OemQuestion: return "/";
-                case System.Windows.Input.Key.Space: return " ";
+                case System.Windows.Input.Key.Space: return "Space";
             }
             return null;
+        }
+
+        /// <summary>
+        /// 热键框的取值规整：**只去掉首尾空白，且不允许把"纯空格"抹成空串**。
+        /// 纯空格（用户手输/粘贴进来的）按命名键 "Space" 处理 —— 否则 `Trim()` 会把它
+        /// 变成一个空串，`HotkeySpec` 判"热键不能为空"后静默回落默认键（B4b-4 的原始症状）。
+        /// </summary>
+        public static string TrimHotkeyText(string s)
+        {
+            if (s == null) return "";
+            string t = s.Trim();
+            if (t.Length == 0 && s.Length > 0) return "Space";
+            return t;
         }
         /// <summary>分区标题（微软用 BodyStrong；这里 14px 半粗 + 上下留白）。</summary>
         public static TextBlock SectionHeader(string text)
@@ -146,16 +169,35 @@ namespace RunEverCs.Views
 
         // ============================================================
         // 常用行（带即时保存回调）
+        //
+        // ★ 2026-11-08（B4b-1）：回调由 `Action<T>` 改成 `Func<T,bool>`。
+        //   原因：auto.conf 写盘失败时，控件**必须自己退回旧值** —— 否则界面上是"已改"、
+        //   磁盘上是"没改"，用户下次开窗才莫名其妙地发现设置没了（原实现就是静默吞掉）。
+        //   `Func` 返回 false = 没写成功 ⇒ 这里把控件回滚到上一次成功的值。
+        //   （各页传的都是 `v => Set(...)`，本来就是 bool，调用点零改动。）
         // ============================================================
-        public static Grid Toggle(string header, string desc, bool value, Action<bool> onChange)
+        public static Grid Toggle(string header, string desc, bool value, Func<bool, bool> onChange)
         {
             var cb = new CheckBox { IsChecked = value, VerticalAlignment = VerticalAlignment.Center };
-            cb.Checked += (s, e) => { if (onChange != null) onChange(true); };
-            cb.Unchecked += (s, e) => { if (onChange != null) onChange(false); };
+
+            bool last = value;
+            bool reverting = false;
+            Action<bool> commit = v =>
+            {
+                if (reverting) return;
+                bool ok = onChange == null || onChange(v);
+                if (ok) { last = v; return; }
+                reverting = true;
+                cb.IsChecked = last;      // 写盘失败 ⇒ 控件回滚
+                reverting = false;
+            };
+
+            cb.Checked += (s, e) => commit(true);
+            cb.Unchecked += (s, e) => commit(false);
             return Row(header, desc, cb);
         }
 
-        public static Grid Text(string header, string desc, string value, Action<string> onChange, double width = 220)
+        public static Grid Text(string header, string desc, string value, Func<string, bool> onChange, double width = 220)
         {
             var tb = new TextBox
             {
@@ -164,22 +206,40 @@ namespace RunEverCs.Views
                 Padding = new Thickness(6, 4, 6, 4),
                 VerticalContentAlignment = VerticalAlignment.Center
             };
-            tb.LostFocus += (s, e) => { if (onChange != null) onChange(tb.Text); };
+            string last = value ?? "";
+            Action commit = () =>
+            {
+                string v = tb.Text ?? "";
+                if (v == last) return;
+                bool ok = onChange == null || onChange(v);
+                if (ok) last = v;
+                else tb.Text = last;      // 写盘失败 ⇒ 控件回滚
+            };
+            tb.LostFocus += (s, e) => commit();
             tb.KeyDown += (s, e) =>
             {
-                if (e.Key == System.Windows.Input.Key.Enter && onChange != null) onChange(tb.Text);
+                if (e.Key == System.Windows.Input.Key.Enter) commit();
             };
             return Row(header, desc, tb);
         }
 
-        public static Grid Combo(string header, string desc, string[] items, string selected, Action<string> onChange)
+        public static Grid Combo(string header, string desc, string[] items, string selected, Func<string, bool> onChange)
         {
             var cb = new ComboBox { Width = 180, SelectedItem = selected };
             foreach (var it in items) cb.Items.Add(it);
             if (cb.SelectedIndex < 0) cb.SelectedIndex = 0;
+
+            object last = cb.SelectedItem;
+            bool reverting = false;
             cb.SelectionChanged += (s, e) =>
             {
-                if (cb.SelectedItem != null && onChange != null) onChange(cb.SelectedItem.ToString());
+                if (reverting || cb.SelectedItem == null) return;
+                string v = cb.SelectedItem.ToString();
+                bool ok = onChange == null || onChange(v);
+                if (ok) { last = cb.SelectedItem; return; }
+                reverting = true;
+                cb.SelectedItem = last;   // 写盘失败 ⇒ 控件回滚
+                reverting = false;
             };
             return Row(header, desc, cb);
         }

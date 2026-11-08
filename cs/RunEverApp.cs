@@ -80,9 +80,30 @@ namespace RunEverCs
         /// </summary>
         public Action<string> UserNotify;
 
+        /// <summary>
+        /// 带自定义标题的用户通知出口（托盘气泡）。
+        /// ★ B4a-2：空菜单解释**不是**"执行失败"，不能套「RunEver 执行失败」的标题。
+        /// 未注入时退化为 <see cref="UserNotify"/>（老调用方零改动）。
+        /// </summary>
+        public Action<string, string> UserNotifyTitled;
+
         private void NotifyUser(string msg)
         {
             Log("通知用户: " + msg);
+            if (UserNotify != null)
+            {
+                try { UserNotify(msg); } catch { }
+            }
+        }
+
+        /// <summary>带标题的通知（先走 <see cref="UserNotifyTitled"/>，没注入就退回 <see cref="UserNotify"/>）。</summary>
+        private void NotifyUser(string title, string msg)
+        {
+            Log("通知用户[" + title + "]: " + msg);
+            if (UserNotifyTitled != null)
+            {
+                try { UserNotifyTitled(title, msg); return; } catch { }
+            }
             if (UserNotify != null)
             {
                 try { UserNotify(msg); } catch { }
@@ -476,6 +497,31 @@ namespace RunEverCs
                 + " | 构建=" + MenuBuilder.LastBuildMs + "ms"
                 + "（条目=" + MenuBuilder.LastItemMs + " 图标=" + MenuBuilder.LastIconMs + "）");
             long tBuild = swTotal.ElapsedMilliseconds;
+
+            // ★ B4a-2（P0 体验）：**全空菜单必须解释**。
+            //   原来 `ItemCount==0` 时照样弹一个空菜单 ⇒ 用户按热键"什么都没出现"（最坏体验）。
+            //   这里两步兜底：① 托盘气泡说清最可能的原因与关掉它的路径 ② 菜单里塞一条
+            //   **禁用占位项**再弹（看得见为什么空，但点不动）。
+            //   ⚠️ 不动 MenuBuilder「跳过空分组」的既有语义（那是对的），只在"全空"这一层兜底。
+            if (built.ItemCount == 0)
+            {
+                int emptyGroups = 0;
+                if (groups != null)
+                    foreach (var g in groups)
+                        if (g == null || g.Items == null || g.Items.Count == 0) emptyGroups++;
+
+                Log("菜单为空：可点条目=0 ⇒ 气泡解释 + 禁用占位项"
+                    + "（分组=" + (groups == null ? 0 : groups.Count)
+                    + " 空分组=" + emptyGroups
+                    + " hideMissing=" + (hideMissing ? 1 : 0)
+                    + " 隐藏=" + hot.HiddenCount + " 候选条目=" + hot.ItemTotal + "）");
+
+                NotifyUser("菜单是空的",
+                    "菜单里没有可显示的条目 —— 可能被『隐藏本机没有的条目』全部隐藏了，"
+                    + "可在 设置 → 触发与行为 关掉它");
+
+                built.Menu.AddItemDisabled("（没有可显示的条目）");
+            }
 
             int selId = 0;
             // ★ 用纯 Win32 owner 窗口（不用 WPF）—— 实测 WPF Window.Show() 要 259ms

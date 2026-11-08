@@ -20,6 +20,8 @@ namespace RunEverCs.Native
         public const uint MF_SEPARATOR = 0x0800;
         public const uint MF_GRAYED = 0x0001;
         public const uint MF_DISABLED = 0x0002;
+        /// <summary>GetMenuState / GetMenuString 的「按位置」口径（B4a-2 断言禁用占位项用）。</summary>
+        public const uint MF_BYPOSITION = 0x00000400;
 
         public const uint TPM_LEFTALIGN = 0x0000;
         public const uint TPM_RIGHTALIGN = 0x0008;
@@ -55,6 +57,13 @@ namespace RunEverCs.Native
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern bool GetMenuStringW(IntPtr hMenu, uint uIDItem, StringBuilder lpString, int cchMax, uint flags);
+
+        /// <summary>
+        /// 取菜单项状态/ID（B4a-2 自检断言「占位项真的灰了」用）。
+        /// 失败返回 0xFFFFFFFF；按位置查时 nId 传索引 + <see cref="MF_BYPOSITION"/>。
+        /// </summary>
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint GetMenuState(IntPtr hMenu, uint nId, uint nFlags);
 
         [DllImport("user32.dll", SetLastError = true)]
         public static extern bool SetMenuItemInfoW(IntPtr hMenu, uint uItem, bool fByPosition, ref MENUITEMINFO lpmii);

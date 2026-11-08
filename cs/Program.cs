@@ -16,6 +16,7 @@ namespace RunEverCs
             //   --selftest  [root]    自检
             //   --settings  [root]    打开设置窗口
             //   --dump-parser ...     解析器 dump（一致性验证）
+            //   --dump-autostart [root] 开机自启项只读诊断（B3-6）
             //   --selftest-menu ...   菜单渲染自检
             //   --selftest-capture .. 采集链自检
             // ============================================================
@@ -50,6 +51,10 @@ namespace RunEverCs
                         return;
                     case "--dump-order":
                         Environment.ExitCode = RunEverCs.Services.MenuOrderProbe.Run(args);
+                        return;
+                    // ★ B3-6（2026-11-08）：开机自启项只读诊断（读注册表值 + 解析 + 判定）
+                    case "--dump-autostart":
+                        Environment.ExitCode = TrayApp.DumpAutoStart(root, args);
                         return;
                     case "--selftest-template":
                         Environment.ExitCode = TemplateSelfTest.Run(args);

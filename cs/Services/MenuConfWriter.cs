@@ -112,8 +112,16 @@ namespace RunEverCs.Services
         }
 
         /// <summary>
-        /// 保存：备份 → 原子写 → 回读校验（不符则回滚）。
+        /// 保存：备份 → **空写硬闸** → 原子写 → 回读校验（不符则回滚）。
         /// 返回 (成功, 说明)。
+        ///
+        /// ★ B4a-1（P0 数据安全）：加**兜底硬闸** —— 兜住所有调用方（设置页 / 测试缝 /
+        ///   将来的 CLI）。原因：`MenuEditorPage.Reload()` 解析失败时集合为空，
+        ///   而旧逻辑照样写盘（`0 组 0 条`）且回读校验 `0==0` 判"成功" ⇒ 一键清空 menus.conf。
+        ///   现在的规则：
+        ///     · 待写集合为空 / 0 条目 + 原文件**存在且分组数 &gt; 0** ⇒ **拒绝写入**（不静默、不落空文件）
+        ///     · 待写集合为空 + 原文件存在但**读不出结构**（已损坏）⇒ 同样拒绝（无法证明安全就保守）
+        ///     · 原文件本来就不存在 / 本来就是 0 分组 ⇒ 允许（首次创建、保存空白初始态）
         /// </summary>
         public bool Save(List<MenuGroup> groups, out string message)
         {
@@ -121,6 +129,52 @@ namespace RunEverCs.Services
             string backupPath = null;
             try
             {
+                // ---- 待写内容的规模（空判定用）----
+                int newGroups = (groups == null) ? 0 : groups.Count;
+                int newItems = 0;
+                if (groups != null)
+                    foreach (var g in groups)
+                        if (g != null && g.Items != null) newItems += g.Items.Count;
+
+                // ---- 磁盘现状（硬闸与回读校验共用）----
+                int diskGroupsBefore = 0, diskItemsBefore = 0;
+                bool diskParsed = true;      // 原文件不存在 ⇒ 视为"没有可保护的内容"
+                if (File.Exists(_confPath) && new FileInfo(_confPath).Length > 0)
+                {
+                    try
+                    {
+                        var old = new ConfParser(_confPath);
+                        old.Parse();
+                        diskGroupsBefore = old.Groups.Count;
+                        foreach (var g in old.Groups) diskItemsBefore += g.Items.Count;
+                    }
+                    catch
+                    {
+                        diskParsed = false;   // 原文件坏到解析不了 ⇒ 绝不能用空集合覆盖它
+                    }
+                }
+
+                // ---- ★ B4a-1 兜底硬闸：空集合不许覆盖"非空/读不出"的现有配置 ----
+                if (newGroups == 0 || newItems == 0)
+                {
+                    if (!diskParsed)
+                    {
+                        message = "拒绝写入：这次要保存的配置是空的（分组 " + newGroups
+                            + "，条目 " + newItems + "），而磁盘上的 menus.conf 存在但读不出结构"
+                            + "（可能已损坏）。为免覆盖掉可恢复的原文件，已取消保存，原文件未改动。";
+                        return false;
+                    }
+                    if (diskGroupsBefore > 0)
+                    {
+                        message = "拒绝写入：这次要保存的配置是空的（分组 " + newGroups
+                            + "，条目 " + newItems + "），而磁盘上的 menus.conf 有 "
+                            + diskGroupsBefore + " 个分组 / " + diskItemsBefore + " 个条目。"
+                            + "多半是配置没读进来 —— 已取消保存，原文件未改动。"
+                            + "（确实要清空请用文本编辑器手工删，或先备份再改）";
+                        return false;
+                    }
+                }
+
                 string text = Serialize(groups);
 
                 // ① 备份
@@ -165,6 +219,18 @@ namespace RunEverCs.Services
                     Rollback(backupPath);
                     message = "回读校验失败：条目数 " + gotItems
                         + " ≠ 期望 " + wantItems + "，已回滚";
+                    return false;
+                }
+
+                // ★ B4a-1（第 5 条）：数量一致之外**单独再断言"没把非空配置写成空"**。
+                //   上面两条"数量相等"在 0==0 时天然成立（这正是在旧版把菜单清空还报"已保存"的
+                //   根因）；这里用**写盘前**的磁盘状态做对照，兜住"空进空出"这一路。
+                if (diskGroupsBefore > 0 && (check.Groups.Count == 0 || gotItems == 0))
+                {
+                    Rollback(backupPath);
+                    message = "回读校验失败：原文件有 " + diskGroupsBefore + " 个分组 / "
+                        + diskItemsBefore + " 个条目，写后变成 0"
+                        + "，已回滚（这是「把非空配置写成空」的典型症状）";
                     return false;
                 }
 

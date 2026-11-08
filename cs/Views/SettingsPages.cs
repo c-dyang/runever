@@ -29,10 +29,15 @@ namespace RunEverCs.Views
             {
                 Text = Get("hotkey", "`"),
                 Width = 150,
+                // ★ B4b-4：组合键最长形如 "#^+F24"（5 字符）⇒ 上限 6，防手滑粘一大段进来
+                MaxLength = 6,
                 Padding = new Thickness(6, 4, 6, 4),
-                VerticalContentAlignment = VerticalAlignment.Center
+                VerticalContentAlignment = VerticalAlignment.Center,
+                ToolTip = "按一个键即可填入；支持 F1–F24 与 Space（显示为 Space）；Backspace 清空"
             };
-            var hotkeyRow = SettingsKit.Row("弹出热键", "按一个键即可填入（Backspace 清空）；单字母需配 Ctrl/Alt，或改用 ` F1-F24", hotkeyBox);
+            var hotkeyRow = SettingsKit.Row("弹出热键",
+                "按一个键即可填入（Backspace 清空）；支持 F1–F24 与 Space；单字母/数字需配 Ctrl/Alt",
+                hotkeyBox);
             // 2026-11-07：按键捕获。
             // ★ 与菜单内快捷键不同，**全局热键不能是裸字母/数字** ——
             //   否则按下就该字符就会被吞掉去弹菜单（HotkeySpec 也会拒绝并回落默认）。
@@ -73,7 +78,9 @@ namespace RunEverCs.Views
             };
             hotkeyBox.LostFocus += (s, e) =>
             {
-                if (hotkeyBox.Text != Get("hotkey", "`")) Set("hotkey", hotkeyBox.Text.Trim());
+                // ★ B4b-4：不能用 `Text.Trim()` —— 纯空格会被抹成空串，热键静默回落默认值
+                string v = SettingsKit.TrimHotkeyText(hotkeyBox.Text);
+                if (v != Get("hotkey", "`")) Set("hotkey", v);
             };
 
             sp.Children.Add(SettingsKit.Card(
@@ -121,6 +128,11 @@ namespace RunEverCs.Views
                 SettingsKit.Text("插件元数据缓存（秒）",
                     "超时后重扫 config\\functions；频繁改插件时调小",
                     Get("cacheSeconds", "300"), v => SetInt("cacheSeconds", PInt(v, 300)), 90)));
+
+            // ★ B1-6：「插件」页原样并入本页末尾（不再单独占一格导航）。
+            //   固定高度是必须的：PluginPage 内部是 DataGrid + DockPanel 的"填满父容器"布局，
+            //   直接塞进外层可滚动 StackPanel（无限高）会让它按内容撑开、滚轮行为打架。
+            sp.Children.Add(new PluginPage(Root) { Height = 430, Margin = new Thickness(0, 6, 0, 0) });
 
             return sp;
         }
@@ -201,6 +213,7 @@ namespace RunEverCs.Views
             var sp = new StackPanel();
 
             sp.Children.Add(SettingsKit.SectionHeader("搜索后端"));
+            _refreshBtn = RefreshButton();
 
             sp.Children.Add(SettingsKit.Card(
                 SettingsKit.Text("Everything 命令行",
@@ -224,60 +237,79 @@ namespace RunEverCs.Views
             sp.Children.Add(SettingsKit.Card(
                 SettingsKit.Info("缓存文件", cachePath),
                 SettingsKit.Info("当前条目数", count.ToString()),
-                SettingsKit.ButtonRow("刷新路径缓存",
-                    "立即重新解析全部程序名（托盘常驻时请从托盘菜单刷新，避免两个进程同时写）",
-                    "立即刷新", RefreshCache)));
+                SettingsKit.Row("刷新路径缓存",
+                    "重新解析全部程序名；后台执行，不会卡住窗口（同一时刻只允许一个刷新）",
+                    _refreshBtn)));
 
             return sp;
         }
 
-        private void RefreshCache()
+        /// <summary>「立即刷新」按钮（要能置灰/改字，所以不用 ButtonRow）。</summary>
+        private Button _refreshBtn;
+
+        private Button RefreshButton()
         {
-            try
+            var b = new Button
             {
-                var r = PathCacheRefresh.Run(Root, null);
-                MessageBox.Show(
-                    r == null ? "已触发刷新。" : ("路径缓存已刷新：" + r.ToString()),
-                    "RunEver", MessageBoxButton.OK, MessageBoxImage.Information);
-            }
-            catch (Exception ex)
+                Content = "立即刷新",
+                Padding = new Thickness(14, 5, 14, 5),
+                MinWidth = 90
+            };
+            b.Click += (s, e) => RefreshCache(b);
+            return b;
+        }
+
+        /// <summary>
+        /// 立即刷新（B4b-7）：① 后台线程跑（全量解析是秒级，跑 UI 线程会假死）；
+        /// ② 结果说人话（`HumanSummary()`，绝不出现 .NET 类型名）；③ 单飞闸在
+        /// `PathCacheRefresh.Run` 里，托盘那边同时刷新只会有一个真的在跑。
+        /// </summary>
+        private void RefreshCache(Button btn)
+        {
+            if (PathCacheRefresh.IsRunning)
             {
-                MessageBox.Show("刷新失败：" + ex.Message, "RunEver",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show("已经有一次刷新正在进行中，请等它结束。", "RunEver",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
             }
+
+            btn.IsEnabled = false;
+            btn.Content = "刷新中…";
+
+            var worker = new System.Threading.Thread(() =>
+            {
+                PathCacheRefresh.Result r = null;
+                Exception err = null;
+                try { r = PathCacheRefresh.Run(Root, null); }
+                catch (Exception ex) { err = ex; }
+
+                Action done = () =>
+                {
+                    btn.IsEnabled = true;
+                    btn.Content = "立即刷新";
+                    string text;
+                    if (err != null)
+                        text = "没能刷新路径缓存。\n\n原因：" + err.Message + "\n\n（详情见 state\\runever-cs.log）";
+                    else
+                        text = r.HumanSummary();
+
+                    MessageBox.Show(text, "RunEver", MessageBoxButton.OK,
+                        (err != null || (r != null && !r.Ok)) ? MessageBoxImage.Warning : MessageBoxImage.Information);
+                };
+
+                try { Dispatcher.BeginInvoke(done); }
+                catch { /* 窗口已关：结果没人看了，正常 */ }
+            });
+            worker.IsBackground = true;
+            worker.Start();
         }
     }
 
-    /// <summary>同步：WebDAV 端点与开关。</summary>
-    internal class SyncPage : AutoConfPage
-    {
-        public SyncPage(string root) : base(root) { }
-
-        protected override UIElement Build()
-        {
-            var sp = new StackPanel();
-
-            sp.Children.Add(SettingsKit.SectionHeader("WebDAV"));
-
-            sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Text("服务器地址", "如 https://nas.example.com:5006/menus",
-                    Get("webdavUrl", ""), v => Set("webdavUrl", v), 380),
-                SettingsKit.Text("用户名", null, Get("webdavUser", ""), v => Set("webdavUser", v), 220),
-                SettingsKit.Text("密码", "写入日志时自动脱敏", Get("webdavPass", ""), v => Set("webdavPass", v), 220),
-                SettingsKit.Text("远端目录", "留空 = 直接用地址本身",
-                    Get("webdavDir", "RunEver"), v => Set("webdavDir", v), 220)));
-
-            sp.Children.Add(SettingsKit.SectionHeader("行为"));
-
-            sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Toggle("启动时自动同步", "托盘就绪后异步执行，不拖慢启动",
-                    GetBool("syncOnStart", false), v => SetBool("syncOnStart", v))));
-
-            return sp;
-        }
-    }
-
-    /// <summary>日志与诊断。</summary>
+    /// <summary>
+    /// 诊断：同步（WebDAV）／日志／状态目录／关于。
+    /// ★ B1-6：原「同步」「日志与诊断」「关于」三页合并到这一页 —— 三页各自只有 2-4 行，
+    ///   拆开只会让人来回点；合并后顺序是「要配的（同步）→ 要看的（日志/目录）→ 只是看看的（关于）」。
+    /// </summary>
     internal class DiagnosticsPage : AutoConfPage
     {
         public DiagnosticsPage(string root) : base(root) { }
@@ -286,23 +318,79 @@ namespace RunEverCs.Views
         {
             var sp = new StackPanel();
 
+            // ================= 同步（WebDAV） =================
+            sp.Children.Add(SettingsKit.SectionHeader("同步（WebDAV）"));
+
+            // ★ 未配置时**不置灰**（置灰会让人永远填不进来 —— 自锁），改成一句人话说明：
+            //   填了地址以后托盘才会出现「同步配置」（托盘那一侧是整项不生成，见 B1-5）。
+            bool syncReady = (Get("webdavUrl", "") ?? "").Trim().Length > 0;
+
+            sp.Children.Add(SettingsKit.Card(
+                SettingsKit.Info("当前状态", syncReady
+                    ? "已配置 —— 托盘右键菜单里会出现「同步配置」"
+                    : "未配置 —— 填上服务器地址后，托盘右键菜单里才会出现「同步配置」"),
+                SettingsKit.Text("服务器地址", "如 https://nas.example.com:5006/menus",
+                    Get("webdavUrl", ""), v => Set("webdavUrl", v), 380),
+                SettingsKit.Text("用户名", null, Get("webdavUser", ""), v => Set("webdavUser", v), 220),
+                SettingsKit.Text("密码", "写入日志时自动脱敏", Get("webdavPass", ""), v => Set("webdavPass", v), 220),
+                SettingsKit.Text("远端目录", "留空 = 直接用地址本身",
+                    Get("webdavDir", "RunEver"), v => Set("webdavDir", v), 220),
+                SettingsKit.Toggle("启动时自动同步", "托盘就绪后异步执行，不拖慢启动",
+                    GetBool("syncOnStart", false), v => SetBool("syncOnStart", v))));
+
+            // ================= 日志 =================
             sp.Children.Add(SettingsKit.SectionHeader("日志"));
 
             sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Toggle("写运行日志", "state\\runever-cs.log；关掉可减少磁盘写入",
+                SettingsKit.Toggle("写运行日志", "state\\runever-cs.log；改完立即生效，不用重启托盘",
                     GetBool("log", true), v => SetBool("log", v)),
-                SettingsKit.ButtonRow("打开日志文件", "定位到 state\\runever-cs.log",
+                SettingsKit.ButtonRow("打开日志文件", "用记事本打开 state\\runever-cs.log",
                     "打开", OpenLog)));
 
+            // ================= 诊断 =================
             sp.Children.Add(SettingsKit.SectionHeader("诊断"));
 
             sp.Children.Add(SettingsKit.Card(
                 SettingsKit.Info("状态目录", System.IO.Path.Combine(Root, "state")),
                 SettingsKit.Info("自动配置", ConfPath),
+                SettingsKit.Info("上次全盘自检", LastSelfCheckText()),
                 SettingsKit.ButtonRow("打开配置目录", "menus.conf / auto.conf 所在位置",
                     "打开", () => OpenDir(System.IO.Path.Combine(Root, "config")))));
 
+            // ================= 关于 =================
+            sp.Children.Add(SettingsKit.SectionHeader("关于"));
+
+            sp.Children.Add(SettingsKit.Card(
+                SettingsKit.Info("版本", "C# 版（net48 / WPF 界面 + Win32 菜单）"),
+                SettingsKit.Info("根目录", Root),
+                SettingsKit.Info("配置文件", System.IO.Path.Combine(Root, "config", "menus.conf")),
+                SettingsKit.Info("插件目录", System.IO.Path.Combine(Root, "config", "functions"))));
+
+            sp.Children.Add(SettingsKit.Card(
+                // ★ B4c-1：菜单早就不走 WPF 了（`NativeMenu` = CreatePopupMenu + AppendMenuW +
+                //   TrackPopupMenuEx），写「WPF ContextMenu（MahApps）」是过期描述，会误导排障方向。
+                SettingsKit.Info("菜单渲染", "Win32 原生（CreatePopupMenu + TrackPopupMenu）"),
+                SettingsKit.Info("采集", "native（Win32 + UI Automation）／ahk（CaptureRunner）"),
+                SettingsKit.Info("搜索后端", "Everything SDK（EV) / es.exe 兜底"),
+                SettingsKit.Info("图标", "ExtractIconExW + 内存缓存，失败回落 assets\\runever.ico")));
+
             return sp;
+        }
+
+        /// <summary>「上次全盘自检」的留痕（B4b-9）：读 state\selfcheck-last.txt 的一行人话。</summary>
+        private string LastSelfCheckText()
+        {
+            try
+            {
+                string f = System.IO.Path.Combine(Root, "state", "selfcheck-last.txt");
+                if (System.IO.File.Exists(f))
+                {
+                    string s = System.IO.File.ReadAllText(f).Trim();
+                    if (s.Length > 0) return s;
+                }
+            }
+            catch { }
+            return "还没跑过（托盘 → 维护 → 全盘自检…）";
         }
 
         private void OpenLog()
@@ -310,7 +398,8 @@ namespace RunEverCs.Views
             string p = System.IO.Path.Combine(Root, "state", "runever-cs.log");
             if (!System.IO.File.Exists(p))
             {
-                MessageBox.Show("日志文件还不存在。", "RunEver",
+                MessageBox.Show("日志文件还不存在：\n" + p
+                    + "\n\n（启动托盘并让它跑一会儿就会生成）", "RunEver",
                     MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
@@ -337,33 +426,6 @@ namespace RunEverCs.Views
                 });
             }
             catch { }
-        }
-    }
-
-    /// <summary>关于：版本、路径、依赖。</summary>
-    internal class AboutPage : UserControl
-    {
-        public AboutPage(string root)
-        {
-            var sp = new StackPanel();
-
-            sp.Children.Add(SettingsKit.SectionHeader("RunEver"));
-
-            sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Info("版本", "C# 版（net48 / WPF 菜单 + Win32 兜底）"),
-                SettingsKit.Info("根目录", root),
-                SettingsKit.Info("配置文件", System.IO.Path.Combine(root, "config", "menus.conf")),
-                SettingsKit.Info("插件目录", System.IO.Path.Combine(root, "config", "functions"))));
-
-            sp.Children.Add(SettingsKit.SectionHeader("组件"));
-
-            sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Info("菜单渲染", "WPF ContextMenu（MahApps 样式，仅作用于菜单）"),
-                SettingsKit.Info("采集", "native（Win32 + UI Automation）／ahk（CaptureRunner）"),
-                SettingsKit.Info("搜索后端", "Everything SDK（EV) / es.exe 兜底"),
-                SettingsKit.Info("图标", "ExtractIconExW + 内存缓存，失败回落 assets\\runever.ico")));
-
-            Content = SettingsKit.PageHost(sp);
         }
     }
 }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using RunEverCs.Services;
 
 namespace RunEverCs.Views
@@ -30,12 +31,31 @@ namespace RunEverCs.Views
         /// <summary>最近一次写盘的结果（供诊断页/状态栏显示）。</summary>
         public string LastWriteStatus { get; private set; } = "";
 
+        /// <summary>页面底部状态行（写盘失败要当场红字，不许静默）。</summary>
+        private TextBlock _statusLine;
+
         protected AutoConfPage(string root)
         {
             Root = root;
             ConfPath = Path.Combine(root, "config", "auto.conf");
             Reload();
-            Content = SettingsKit.PageHost(Build());
+
+            // ★ B4b-1：页面自带一条状态行。设置项是「改完立即落盘」的，
+            //   一旦写盘失败（文件只读 / 目录被占 / 磁盘满），用户必须**当场**看见，
+            //   而不是下一次开窗才发现值没变。
+            _statusLine = new TextBlock
+            {
+                FontSize = 11.5,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(28, 0, 28, 10),
+                Visibility = Visibility.Collapsed
+            };
+
+            var dock = new DockPanel();
+            DockPanel.SetDock(_statusLine, Dock.Bottom);
+            dock.Children.Add(_statusLine);
+            dock.Children.Add(SettingsKit.PageHost(Build()));
+            Content = dock;
         }
 
         /// <summary>子类实现：构建页面内容（返回一个纵向 StackPanel 即可）。</summary>
@@ -66,7 +86,7 @@ namespace RunEverCs.Views
             return int.TryParse(Get(key, ""), out n) ? n : def;
         }
 
-        /// <summary>改一个键并立刻落盘；成功则触发 AfterSave。</summary>
+        /// <summary>改一个键并立刻落盘；成功则触发 AfterSave，失败则在状态行红字说明（控件由 SettingsKit 回滚）。</summary>
         protected bool Set(string key, string val)
         {
             var vals = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { key, val ?? "" } };
@@ -75,10 +95,31 @@ namespace RunEverCs.Views
             if (r.Ok)
             {
                 _vals[key] = val ?? "";
+                ShowStatus("已保存：" + key, false);
                 var cb = AfterSave;
                 if (cb != null) { try { cb(); } catch { } }
             }
+            else
+            {
+                // ★ B4b-1：以前这里是"静默吞掉" —— 开关看着像成功了，磁盘上其实没改。
+                //   现在状态行给红字，并把完整路径写清楚（多半是权限/占用问题）。
+                ShowStatus("保存失败（" + key + "）：" + r.Error
+                    + "\n该设置已还原为原来的值。文件：" + ConfPath, true);
+            }
             return r.Ok;
+        }
+
+        /// <summary>在页面底部状态行显示一行结果（isError=true 时红字）。</summary>
+        private void ShowStatus(string text, bool isError)
+        {
+            if (_statusLine == null) return;
+            try
+            {
+                _statusLine.Text = text;
+                _statusLine.Foreground = isError ? Brushes.Firebrick : SettingsKit.TextSecondary;
+                _statusLine.Visibility = Visibility.Visible;
+            }
+            catch { }
         }
 
         protected bool SetBool(string key, bool v) { return Set(key, v ? "1" : "0"); }

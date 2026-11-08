@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Text;
@@ -87,6 +88,8 @@ namespace RunEverCs
             // ★ v8（AC-5③ 禁静默）：执行期失败（程序移位现查未命中 / 超时 / 启动异常）
             //   ⇒ **托盘气泡**（用户可见）+ state\ 日志。消灭"点了没反应"。
             _app.UserNotify = msg => TrayTipThreadSafe("RunEver 执行失败", msg, ToolTipIcon.Warning);
+            // ★ B4a-2：非错误类提示（空菜单解释）走带标题的通道 —— 标题不能是「执行失败」。
+            _app.UserNotifyTitled = (title, msg) => TrayTipThreadSafe(title, msg, ToolTipIcon.Info);
 
             // ---- 热键消息窗口 ----
             //   ★ 热键来自 auto.conf 的 hotkey=（不再是硬编码反引号）——
@@ -119,6 +122,9 @@ namespace RunEverCs
             //   （那是 uiBackend=wpf 时代为"首次弹菜单少付 230ms"准备的，同时也把 ~60MB
             //   主题字典焊死在常驻进程里）。WPF 只在设置窗口（独立进程）里出现。
             _app.Log("[diag] 菜单=Win32（WPF 仅设置窗口）| capture=ahk-resident");
+
+            // ★ B3-5：启动自检自启项 —— 指向别处/参数坏时必须在日志里说清楚
+            CheckAutoStartAtStartup();
 
             _app.Log("=== 进入常驻托盘模式 ===");
             TrayTip("RunEver 已启动",
@@ -170,6 +176,7 @@ namespace RunEverCs
 
             var menu = new ContextMenuStrip();
 
+            // ---- 常用三件 ----
             var miShow = new ToolStripMenuItem("显示菜单");
             miShow.Font = new Font(miShow.Font, FontStyle.Bold);
             miShow.Click += (s, e) => InvokeMenu();
@@ -185,55 +192,82 @@ namespace RunEverCs
             miReload.Click += (s, e) => ReloadConfig();
             menu.Items.Add(miReload);
 
+            // ★ v7（WebDAV 配置同步）：把「菜单配置 + 插件」与远端双向对齐（新者胜 + 覆盖前备份）。
+            // ★ B1-5：auto.conf 的 webdavUrl 为空（= 同步未配置）时**整项不生成**，
+            //   而不是灰掉 —— 没配端点时这个入口对用户零价值，灰项只会让人以为坏了。
+            if (WebDavConfig.Load(_root).IsConfigured)
+            {
+                var miSync = new ToolStripMenuItem("同步配置");
+                miSync.Click += (s, e) => SyncConfig();
+                menu.Items.Add(miSync);
+            }
+
             menu.Items.Add(new ToolStripSeparator());
+
+            // ---- 维护 ▸（低频但排障要用；子项用 DropDownItems 建子菜单）----
+            //   参考：ToolStripMenuItem.DropDownItems + ToolStripSeparator
+            //   https://learn.microsoft.com/zh-cn/answers/questions/1631296/vs2022
+            var miMaintain = new ToolStripMenuItem("维护");
+            menu.Items.Add(miMaintain);
 
             // ★ 对齐 AHK 托盘「刷新路径缓存」（src\RunEver.ahk:499 → :1019 TriggerCacheBuild）
             var miRefreshCache = new ToolStripMenuItem("刷新路径缓存");
             miRefreshCache.Click += (s, e) => RefreshPathCache();
-            menu.Items.Add(miRefreshCache);
+            miMaintain.DropDownItems.Add(miRefreshCache);
 
             // ★ 功能 B（用户 2026-10-03）：全盘自检 —— 配置驱动逐条查存在性
             //   结果窗口只给「未安装清单 + choco 命令清单」，**不做一键安装**（不弹 UAC、不跑 choco）
             var miSelfCheck = new ToolStripMenuItem("全盘自检…");
             miSelfCheck.Click += (s, e) => RunSelfCheck();
-            menu.Items.Add(miSelfCheck);
+            miMaintain.DropDownItems.Add(miSelfCheck);
+
+            var miLog = new ToolStripMenuItem("打开日志");
+            miLog.Click += (s, e) => OpenPath(Path.Combine(_root, "state", "runever-cs.log"), "运行日志");
+            miMaintain.DropDownItems.Add(miLog);
+
+            miMaintain.DropDownItems.Add(new ToolStripSeparator());
+
+            // ★ 对齐 AHK 托盘（src\RunEver.ahk:501-505）：打开类入口
+            //   托盘顶层要压到 8 项 ⇒ 这两个低频入口下沉到「维护 ▸」（功能不删）
+            var miConf = new ToolStripMenuItem("打开菜单配置");
+            miConf.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "menus.conf"), "菜单配置");
+            miMaintain.DropDownItems.Add(miConf);
+
+            var miAutoConf = new ToolStripMenuItem("打开自动执行配置");
+            miAutoConf.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "auto.conf"), "自动执行配置");
+            miMaintain.DropDownItems.Add(miAutoConf);
+
+            var miStatus = new ToolStripMenuItem("状态…");
+            miStatus.Click += (s, e) => ShowStatus();
+            miMaintain.DropDownItems.Add(miStatus);
+
+            // ---- 插件 ▸ ----
+            var miPlugin = new ToolStripMenuItem("插件");
+            menu.Items.Add(miPlugin);
 
             // ★ 对齐 AHK 托盘「刷新插件」（src\RunEver.ahk:500 → :535 RefreshPlugins）
             var miRefreshFn = new ToolStripMenuItem("刷新插件");
             miRefreshFn.Click += (s, e) => RefreshPlugins();
-            menu.Items.Add(miRefreshFn);
-
-            // ★ v7（WebDAV 配置同步）：把「菜单配置 + 插件」与远端双向对齐（新者胜 + 覆盖前备份）。
-            //   webdavUrl 留空 ⇒ 安静跳过，**不动任何文件**（不是报错、更不是清空配置）。
-            var miSync = new ToolStripMenuItem("同步配置");
-            miSync.Click += (s, e) => SyncConfig();
-            menu.Items.Add(miSync);
-
-            // ★ 对齐 AHK 托盘（src\RunEver.ahk:501-505）：打开类入口
-            var miConf = new ToolStripMenuItem("打开配置（菜单）");
-            miConf.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "menus.conf"));
-            menu.Items.Add(miConf);
-
-            var miAutoConf = new ToolStripMenuItem("打开自动执行配置");
-            miAutoConf.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "auto.conf"));
-            menu.Items.Add(miAutoConf);
+            miPlugin.DropDownItems.Add(miRefreshFn);
 
             var miPlugins = new ToolStripMenuItem("打开插件目录");
-            miPlugins.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "functions"));
-            menu.Items.Add(miPlugins);
+            miPlugins.Click += (s, e) => OpenPath(Path.Combine(_root, "config", "functions"), "插件目录");
+            miPlugin.DropDownItems.Add(miPlugins);
 
             var miFnReg = new ToolStripMenuItem("打开插件登记");
             miFnReg.Click += (s, e) => OpenPluginRegistry();
-            menu.Items.Add(miFnReg);
-
-            var miLog = new ToolStripMenuItem("打开日志");
-            miLog.Click += (s, e) => OpenPath(Path.Combine(_root, "state", "runever-cs.log"));
-            menu.Items.Add(miLog);
+            miPlugin.DropDownItems.Add(miFnReg);
 
             menu.Items.Add(new ToolStripSeparator());
 
             // ★ 开机自启开关（用户点击才写注册表，程序不擅自改系统配置）
-            var miAuto = new ToolStripMenuItem("开机自启")
+            //   B3-2：勾选状态 = 「值存在 **且** 指向本进程」；值存在但指向别处/参数坏
+            //   ⇒ 不勾选，并在文案上明说「路径已失效」。
+            var autoInfo = QueryAutoStart(SelfExePath());
+            var miAuto = new ToolStripMenuItem(
+                autoInfo.ValueExists && !autoInfo.MatchesSelf
+                    ? "开机自启（路径已失效）"
+                    : "开机自启")
             {
                 CheckOnClick = true,
                 Checked = IsAutoStartEnabled()
@@ -243,6 +277,7 @@ namespace RunEverCs
                 bool want = miAuto.Checked;
                 if (SetAutoStart(want))
                 {
+                    miAuto.Text = "开机自启";   // 覆盖成功后「（路径已失效）」文案要撤掉
                     _app.Log("开机自启 → " + (want ? "开" : "关"));
                     TrayTip("RunEver", want ? "已设为开机自启" : "已关闭开机自启",
                         ToolTipIcon.Info);
@@ -255,10 +290,6 @@ namespace RunEverCs
                 }
             };
             menu.Items.Add(miAuto);
-
-            var miStatus = new ToolStripMenuItem("状态…");
-            miStatus.Click += (s, e) => ShowStatus();
-            menu.Items.Add(miStatus);
 
             var miExit = new ToolStripMenuItem("退出");
             miExit.Click += (s, e) => Shutdown();
@@ -307,50 +338,505 @@ namespace RunEverCs
 
         // ============================================================
         // 开机自启（HKCU\...\Run，无需管理员权限）
+        //
+        // ★ B3 修复（2026-11-08）—— 旧实现把 PC 的自启项写成了**坏值**：
+        //     写入内容 = "…\RunEverCs.exe" --root "D:\Tools\RunEver-20261107\"
+        //   MS Learn「Parsing C++ Command-Line Arguments」的规则：
+        //     奇数个反斜杠 + 引号 ⇒ 引号被当**转义符**，产出**字面引号**；
+        //     末尾 `…20261107\"` = 1 个反斜杠 + 引号 ⇒ `--root` 实际收到
+        //     `D:\Tools\RunEver-20261107"`（多一个引号）⇒ Program.FindRoot 的
+        //     TrimEnd('\\','/') 去不掉引号 ⇒ root 非法 ⇒ 读不到 config\menus.conf
+        //     ⇒ 「手动双击能用、开机起不来」。
+        //
+        //   三条硬规则（全项目「路径进命令行」通用判据）：
+        //     ① 进命令行的路径先 TrimEnd('\\','/')，**绝不许**以反斜杠结尾；
+        //     ② 引号只允许出现在参数两端，串里**不许**出现 \" 这种形态；
+        //     ③ 写完必须回读，用 CommandLineToArgvW 解析自校验（写坏宁可不写）。
         // ============================================================
         private const string RunKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-        private const string RunValueName = "RunEver";
 
-        private bool IsAutoStartEnabled()
+        /// <summary>本程序的值名（B3-4：与旧 AHK 版的 `RunEver` 分开，各写各的）。</summary>
+        private const string RunValueName = "RunEverCs";
+
+        /// <summary>旧 AHK 版的值名。只在用户点「开启」时清理，且必须确认它指向 RunEver*.exe。</summary>
+        private const string LegacyRunValueName = "RunEver";
+
+        /// <summary>自启项的一次只读快照。</summary>
+        private sealed class AutoStartInfo
         {
+            public bool ValueExists;
+            public string CommandLine = "";
+            public string[] Args = new string[0];
+            public string Exe = "";
+            public string Root = "";
+            public string SelfExe = "";
+            public bool MatchesSelf;
+            public bool ExeExists;
+            public bool RootConfigExists;
+
+            /// <summary>命令串里出现 `\"`（转义引号）—— 正常写法永远不该有。</summary>
+            public bool HasEscapedQuote;
+
+            /// <summary>解析出的实参里有以引号结尾的 —— 正是 PC 那条坏值的症状。</summary>
+            public bool ArgEndsWithQuote;
+        }
+
+        /// <summary>当前进程 exe 全路径（MainModule 失败回退 Assembly.Location）。</summary>
+        private static string SelfExePath()
+        {
+            try
+            {
+                using (var proc = System.Diagnostics.Process.GetCurrentProcess())
+                {
+                    string f = proc.MainModule.FileName;
+                    if (!string.IsNullOrEmpty(f)) return f;
+                }
+            }
+            catch { }
+
+            try
+            {
+                var asm = System.Reflection.Assembly.GetEntryAssembly()
+                          ?? System.Reflection.Assembly.GetExecutingAssembly();
+                if (asm != null && !string.IsNullOrEmpty(asm.Location)) return asm.Location;
+            }
+            catch { }
+
+            return "";
+        }
+
+        /// <summary>
+        /// 路径进命令行前的归一化：去首尾空白与可能的引号，再 TrimEnd 反斜杠/斜杠。
+        /// 第二步是 B3-1 的核心 —— 只有保证路径不以 `\` 结尾，组出来的
+        /// `"…\path"` 才不会退化成 `…path\"`（转义引号）。
+        /// 顺手去掉首尾引号：PC 上那条坏值回灌（`…20261107"`）也能被修回来。
+        /// </summary>
+        private static string NormalizePathForCmd(string p)
+        {
+            if (p == null) return "";
+            p = p.Trim().Trim('"');
+            return p.TrimEnd('\\', '/');
+        }
+
+        /// <summary>把路径包成命令行参数（含空格才必须加引号，但统一加更稳）。</summary>
+        private static string QuoteArg(string p)
+        {
+            return "\"" + p + "\"";
+        }
+
+        /// <summary>
+        /// 组装自启命令：`"exe" --root "root"`。
+        /// 入参先归一化 ⇒ 结果里不可能出现 `\"`（B3-1 的不变式）。
+        /// </summary>
+        private static string BuildAutoStartCommand(string exe, string root)
+        {
+            return QuoteArg(NormalizePathForCmd(exe))
+                 + " --root " + QuoteArg(NormalizePathForCmd(root));
+        }
+
+        // ---- Win32 权威口径的命令行切分（C# 侧不做近似解析） ----
+
+        [System.Runtime.InteropServices.DllImport("shell32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(string lpCmdLine, out int pNumArgs);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr hMem);
+
+        /// <summary>用 CommandLineToArgvW 切命令行（与 Windows 拉起进程时的口径一致）。</summary>
+        private static string[] SplitCommandLine(string cmdLine)
+        {
+            if (string.IsNullOrEmpty(cmdLine)) return new string[0];
+
+            IntPtr p = IntPtr.Zero;
+            try
+            {
+                int n;
+                p = CommandLineToArgvW(cmdLine, out n);
+                if (p == IntPtr.Zero || n <= 0) return new string[0];
+
+                var res = new string[n];
+                for (int i = 0; i < n; i++)
+                {
+                    IntPtr s = System.Runtime.InteropServices.Marshal.ReadIntPtr(p, i * IntPtr.Size);
+                    res[i] = s == IntPtr.Zero
+                        ? "" : System.Runtime.InteropServices.Marshal.PtrToStringUni(s);
+                }
+                return res;
+            }
+            catch { return new string[0]; }
+            finally
+            {
+                if (p != IntPtr.Zero)
+                {
+                    try { LocalFree(p); } catch { }
+                }
+            }
+        }
+
+        /// <summary>从 argv 取 --root 的值（与 Program.FindRoot 同口径：TrimEnd 反斜杠）。</summary>
+        private static string RootFromArgs(string[] args)
+        {
+            if (args == null) return "";
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                if (args[i] == "--root") return NormalizePathForCmd(args[i + 1]);
+            }
+            return "";
+        }
+
+        /// <summary>读一次注册表并解析成快照（**只读**：不创建键、不写值、不删值）。</summary>
+        private static AutoStartInfo QueryAutoStart(string selfExe)
+        {
+            var info = new AutoStartInfo();
+            info.SelfExe = selfExe ?? "";
+
             try
             {
                 using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath))
                 {
-                    if (k == null) return false;
+                    if (k == null) return info;
+
                     var v = k.GetValue(RunValueName) as string;
-                    return !string.IsNullOrEmpty(v);
+                    if (string.IsNullOrEmpty(v)) return info;
+
+                    info.ValueExists = true;
+                    info.CommandLine = v;
+                    info.Args = SplitCommandLine(v);
+                    if (info.Args.Length > 0) info.Exe = info.Args[0];
+                    info.Root = RootFromArgs(info.Args);
+
+                    info.HasEscapedQuote = v.IndexOf("\\\"", StringComparison.Ordinal) >= 0;
+                    foreach (string a in info.Args)
+                    {
+                        if (a != null && a.EndsWith("\"", StringComparison.Ordinal))
+                            info.ArgEndsWithQuote = true;
+                    }
+
+                    info.MatchesSelf = info.Exe.Length > 0 && info.SelfExe.Length > 0
+                        && string.Equals(info.Exe, info.SelfExe, StringComparison.OrdinalIgnoreCase);
+
+                    try { info.ExeExists = info.Exe.Length > 0 && File.Exists(info.Exe); }
+                    catch { }
+
+                    try
+                    {
+                        info.RootConfigExists = info.Root.Length > 0
+                            && File.Exists(Path.Combine(info.Root, "config", "menus.conf"));
+                    }
+                    catch { }
                 }
             }
-            catch { return false; }
+            catch { }
+
+            return info;
+        }
+
+        /// <summary>B3-2：值存在 **且** 指向本进程 exe 才算「已开启」（坏值/旧路径一律 false）。</summary>
+        private bool IsAutoStartEnabled()
+        {
+            return QueryAutoStart(SelfExePath()).MatchesSelf;
+        }
+
+        /// <summary>
+        /// B3-1 的判据：把命令串按 CommandLineToArgvW 切开，必须**恰好**还原
+        /// `[exe, --root, root]`；任何实参都不许以引号结尾，串里不许有 `\"`。
+        /// </summary>
+        private static bool VerifyAutoStartCommand(string cmd, string expectExe,
+            string expectRoot, out string why)
+        {
+            why = "";
+            if (string.IsNullOrEmpty(cmd)) { why = "命令串为空"; return false; }
+
+            if (cmd.IndexOf("\\\"", StringComparison.Ordinal) >= 0)
+            {
+                why = "命令串含 \\\" （转义引号）形态：" + cmd;
+                return false;
+            }
+
+            string[] a = SplitCommandLine(cmd);
+            if (a.Length != 3)
+            {
+                why = "实参个数 " + a.Length + "（应为 3）：" + cmd;
+                return false;
+            }
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (string.IsNullOrEmpty(a[i]) || a[i].EndsWith("\"", StringComparison.Ordinal))
+                {
+                    why = "argv[" + i + "] 为空或以引号结尾：<" + a[i] + ">";
+                    return false;
+                }
+            }
+            if (!string.Equals(a[0], expectExe, StringComparison.OrdinalIgnoreCase))
+            {
+                why = "argv[0]=<" + a[0] + "> ≠ 期望 exe <" + expectExe + ">";
+                return false;
+            }
+            if (a[1] != "--root")
+            {
+                why = "argv[1]=<" + a[1] + "> ≠ --root";
+                return false;
+            }
+            if (!string.Equals(a[2].TrimEnd('\\', '/'), expectRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                why = "argv[2]=<" + a[2] + "> ≠ 期望 root <" + expectRoot + ">";
+                return false;
+            }
+            return true;
         }
 
         private bool SetAutoStart(bool on)
         {
             try
             {
-                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, true))
+                // B3-3：键不存在时 OpenSubKey 返回 null（旧实现直接 return false ⇒ 静默失败）
+                var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath, true);
+                if (k == null) k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKeyPath);
+                if (k == null)
                 {
-                    if (k == null) return false;
+                    _app.Log("⚠ 开机自启：打不开也建不了注册表键 HKCU\\" + RunKeyPath);
+                    return false;
+                }
 
-                    if (on)
-                    {
-                        string self = "";
-                        using (var proc = System.Diagnostics.Process.GetCurrentProcess())
-                            self = proc.MainModule.FileName;
-
-                        // 注意：路径含空格必须加引号，否则注册表 Run 项会解析错
-                        k.SetValue(RunValueName,
-                            "\"" + self + "\" --root \"" + _root + "\"");
-                    }
-                    else
+                using (k)
+                {
+                    if (!on)
                     {
                         k.DeleteValue(RunValueName, false);
+                        _app.Log("开机自启：已删除值 " + RunValueName);
+                        return true;
                     }
+
+                    string self = SelfExePath();
+                    if (string.IsNullOrEmpty(self))
+                    {
+                        _app.Log("⚠ 开机自启：取不到本进程 exe 路径，放弃写入");
+                        return false;
+                    }
+
+                    string expectExe = NormalizePathForCmd(self);
+                    string expectRoot = NormalizePathForCmd(_root);
+                    string cmd = BuildAutoStartCommand(expectExe, expectRoot);
+
+                    // 写前自校验（B3-1）：解析不出来就根本别写
+                    string why;
+                    if (!VerifyAutoStartCommand(cmd, expectExe, expectRoot, out why))
+                    {
+                        _app.Log("⚠ 开机自启：组装出的命令自校验失败，未写入 —— " + why);
+                        return false;
+                    }
+
+                    k.SetValue(RunValueName, cmd, Microsoft.Win32.RegistryValueKind.String);
+
+                    // 回读自校验（B3-1：写完不信自己，信 CommandLineToArgvW）
+                    var back = k.GetValue(RunValueName) as string;
+                    if (!VerifyAutoStartCommand(back, expectExe, expectRoot, out why))
+                    {
+                        k.DeleteValue(RunValueName, false);   // 宁可不自启，也不留坏值
+                        _app.Log("⚠ 开机自启：回读校验失败，已删掉刚写的值 —— " + why
+                            + " | 实际值=" + (back ?? "(null)"));
+                        return false;
+                    }
+
+                    _app.Log("开机自启：已写入 " + RunValueName + " = " + back);
+                    CleanLegacyAutoStart(k);
                     return true;
                 }
             }
-            catch { return false; }
+            catch (Exception ex)
+            {
+                _app.Log("⚠ 设置开机自启异常: " + ex.GetType().Name + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// B3-4：清掉旧 AHK 版留下的 `RunEver` 值。
+        /// 铁律：**只有确认它指向 RunEver*.exe** 才删；其余一律不碰（绝不误删别人的自启项）。
+        /// </summary>
+        private void CleanLegacyAutoStart(Microsoft.Win32.RegistryKey runKey)
+        {
+            try
+            {
+                var old = runKey.GetValue(LegacyRunValueName) as string;
+                if (string.IsNullOrEmpty(old)) return;
+
+                if (!LooksLikeRunEverCommand(old))
+                {
+                    _app.Log("开机自启：旧值 " + LegacyRunValueName
+                        + " 不指向 RunEver*.exe，保留不动（不碰别人的自启项）→ " + old);
+                    return;
+                }
+
+                runKey.DeleteValue(LegacyRunValueName, false);
+                _app.Log("开机自启：已清理旧值 " + LegacyRunValueName + "（" + old + "）");
+            }
+            catch (Exception ex)
+            {
+                _app.Log("⚠ 清理旧自启值失败（不影响新值）: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 判断一个 Run 值是不是「RunEver 自己的」：取 argv[0]（拿不到用整串），
+        /// 必须以 `.exe` 结尾且含 `RunEver`。存在的意义只有一条：绝不误删别人的自启项。
+        /// </summary>
+        private static bool LooksLikeRunEverCommand(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return false;
+
+            string exe = "";
+            string[] a = SplitCommandLine(value);
+            if (a.Length > 0 && !string.IsNullOrEmpty(a[0])) exe = a[0];
+            else exe = value;
+
+            exe = exe.Trim().Trim('"');
+            if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
+            return exe.IndexOf("RunEver", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        /// <summary>
+        /// B3-5：启动自检 —— 自启项存在但不指向自己时，**必须**在日志里说清楚，不许静默
+        /// （这样「开机没起来」能一眼分辨是方案没写 / 写坏了 / 指向了别的 exe）。
+        /// </summary>
+        private void CheckAutoStartAtStartup()
+        {
+            try
+            {
+                var a = QueryAutoStart(SelfExePath());
+
+                if (!a.ValueExists)
+                {
+                    _app.Log("AUTOSTART 未设置（开机不自启；只在用户点「开机自启」时才写）");
+                    return;
+                }
+
+                if (!a.MatchesSelf)
+                {
+                    _app.Log("⚠ 自启项指向 " + a.Exe + "（当前 " + a.SelfExe + "）"
+                        + " | 值=" + a.CommandLine);
+                    return;
+                }
+
+                _app.Log("AUTOSTART 已开启 → " + a.Exe
+                    + (a.Root.Length > 0 ? " --root " + a.Root : "（无 --root）")
+                    + " | config\\menus.conf " + (a.RootConfigExists ? "存在" : "⚠ 不存在"));
+
+                if (a.HasEscapedQuote || a.ArgEndsWithQuote)
+                    _app.Log("⚠ 自启项命令串形态可疑（含转义引号）——建议关一次再开一次以重写");
+            }
+            catch (Exception ex)
+            {
+                _app.Log("AUTOSTART 自检异常: " + ex.Message);
+            }
+        }
+
+        /// <summary>「状态…」里那句自启描述（值存在但失效时必须说清指向了谁）。</summary>
+        private string AutoStartSummary()
+        {
+            var a = QueryAutoStart(SelfExePath());
+            if (!a.ValueExists) return "未开启";
+            if (!a.MatchesSelf)
+                return "已写注册表但指向 " + a.Exe + "（当前 " + a.SelfExe
+                    + "）—— 开机不会起来，请重勾一次覆盖";
+            return "已开启"
+                + (a.RootConfigExists ? "" : "（⚠ 参数里的 root 下没有 config\\menus.conf）");
+        }
+
+        /// <summary>
+        /// B3-6：`--dump-autostart [root]` —— 只读诊断（供自检与排障）。
+        /// 输出：注册表原值 / CommandLineToArgvW 切出的 argv / exe / root /
+        ///       是否指向本进程 / 目标是否存在。不创建键、不写值、不删值。
+        /// 退出码：0 = 读到了（含「当前未设置」）；1 = 值存在但与本进程不一致。
+        /// </summary>
+        public static int DumpAutoStart(string root, string[] args)
+        {
+            try { Console.OutputEncoding = new UTF8Encoding(false); } catch { }
+
+            var o = Console.Out;
+            string self = SelfExePath();
+
+            // [root] 位置参数优先（`--dump-autostart .`），其次 --root，最后用进程 root
+            string argRoot = "";
+            if (args != null)
+            {
+                for (int i = 1; i < args.Length; i++)
+                {
+                    if (args[i] == "--root" && i + 1 < args.Length) { argRoot = args[++i]; continue; }
+                    if (!args[i].StartsWith("--", StringComparison.Ordinal) && argRoot.Length == 0)
+                        argRoot = args[i];
+                }
+            }
+            if (argRoot.Length == 0) argRoot = root;
+            try { argRoot = Path.GetFullPath(argRoot); } catch { }
+            string argRootRaw = argRoot;
+            argRoot = NormalizePathForCmd(argRoot);
+
+            o.WriteLine("=== RunEver 开机自启诊断（只读，不改注册表）===");
+            o.WriteLine("注册表键 ：HKCU\\" + RunKeyPath);
+            o.WriteLine("本进程 exe：" + (self.Length > 0 ? self : "(取不到)"));
+            o.WriteLine("本进程 root：" + argRoot
+                + (argRootRaw != argRoot ? "（入参 <" + argRootRaw + "> 已归一化）" : ""));
+
+            var a = QueryAutoStart(self);
+
+            if (!a.ValueExists)
+            {
+                o.WriteLine("值 [" + RunValueName + "]：当前未设置（开机不自启）");
+            }
+            else
+            {
+                o.WriteLine("值 [" + RunValueName + "] 原始串：" + a.CommandLine);
+                o.WriteLine("  argv(" + a.Args.Length + ")：" + string.Join(" | ", a.Args));
+                o.WriteLine("  解析 exe   ：" + (a.Exe.Length > 0 ? a.Exe : "(空)")
+                    + "   [文件存在=" + (a.ExeExists ? "是" : "否") + "]");
+                o.WriteLine("  解析 root  ：" + (a.Root.Length > 0 ? a.Root : "(无 --root)"));
+                o.WriteLine("  config\\menus.conf：" + (a.RootConfigExists ? "存在" : "**不存在**"));
+                o.WriteLine("  指向本进程 ：" + (a.MatchesSelf
+                    ? "是"
+                    : "**否**（指向 " + a.Exe + "，当前 " + a.SelfExe + "）"));
+                o.WriteLine("  命令串形态 ：含 \\\" =" + (a.HasEscapedQuote ? "是（坏）" : "否")
+                    + "；实参以引号结尾 =" + (a.ArgEndsWithQuote ? "是（坏）" : "否"));
+            }
+
+            // 旧值也读出来（只读，不删）—— PC 上那条坏值就在 RunEver 名下
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKeyPath))
+                {
+                    if (k != null)
+                    {
+                        var old = k.GetValue(LegacyRunValueName) as string;
+                        if (!string.IsNullOrEmpty(old))
+                        {
+                            o.WriteLine("旧值 [" + LegacyRunValueName + "]（本工具不动它）：" + old);
+                            o.WriteLine("  指向 RunEver*.exe ：" + (LooksLikeRunEverCommand(old)
+                                ? "是（下次点「开机自启」开启时会被清理）"
+                                : "否（属于别的程序，永远不会被删）"));
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            int code = 0;
+            if (!a.ValueExists) o.WriteLine("判定：未开启");
+            else if (a.MatchesSelf) o.WriteLine("判定：已开启，且指向本进程（有效）");
+            else { o.WriteLine("判定：⚠ 值存在但无效（开机不会正确启动）"); code = 1; }
+
+            // [试算] 只算不写：把「现在点开启」会生成的命令串算出来，并走一遍 B3-1 的写前校验。
+            //   目的：无副作用地验证「TrimEnd + 引号安全」在本机路径上成立（含尾反斜杠入参的对照）。
+            string trialCmd = BuildAutoStartCommand(self, argRootRaw);
+            string why;
+            bool trialOk = VerifyAutoStartCommand(trialCmd, NormalizePathForCmd(self),
+                NormalizePathForCmd(argRootRaw), out why);
+            o.WriteLine("[试算·不写注册表] 命令串：" + trialCmd);
+            o.WriteLine("  解析 argv（CommandLineToArgvW）："
+                + string.Join(" | ", SplitCommandLine(trialCmd)));
+            o.WriteLine("  写前自校验：" + (trialOk ? "通过" : "**失败** — " + why));
+
+            return code;
         }
 
         private Icon LoadIcon()
@@ -437,6 +923,9 @@ namespace RunEverCs
                     () =>
                     {
                         if (_app != null) _app.OnAutoConfSaved();
+                        // ★ B4b-11：「写运行日志」勾上/去掉要**立刻**生效
+                        //   （原来只在启动时读一次 auto.conf ⇒ 改完必须重启托盘，页面又没写这句话）
+                        ApplyLogSettingNow();
                     });
                 // ★ 设置里可能改了触发热键（auto.conf hotkey=）→ 关窗即重注册
                 w.Closed += (s, e) => ApplyHotkey();
@@ -451,24 +940,98 @@ namespace RunEverCs
             }
         }
 
-        private void ReloadConfig()
+        /// <summary>
+        /// 手动重载配置。
+        /// ★ B4b-10：**先建好、验证通过，再替换**。原实现 `_app = new RunEverApp(...)` 先换实例
+        ///   再 `Init()` —— 配置有语法错时拿到的是一台半初始化实例，成员全空，
+        ///   托盘随后弹菜单就是"什么都没了"，而用户只是点了一下「重载配置」。
+        /// </summary>
+        /// <summary>
+        /// 把 auto.conf 里的日志开关即时应用到运行实例（B4b-11）。
+        /// 口径与 `RunEverApp.ReadLogSettings` 一致：`log=0` ⇒ 关（LogLevel=0）；
+        /// `log=1` ⇒ 开（若原本是 0 则回到 1）；`loglevel` 给更细的级别（2=详细）。
+        /// ★ 为什么在这里重读一遍：`ReadLogSettings` 是 RunEverApp 的私有实现、只在启动跑一次；
+        ///   而托盘持有实例，改完设置后由自己把新值推进去最省事，也避免动 RunEverApp 的启动路径。
+        /// </summary>
+        private void ApplyLogSettingNow()
         {
             try
             {
-                bool ok;
-                _app = new RunEverApp(_root);
-                ok = _app.Init();
-                // ★ v8：重载后同样接上失败气泡出口（与 Start 一致）
-                _app.UserNotify = msg => TrayTipThreadSafe("RunEver 执行失败", msg, ToolTipIcon.Warning);
-                _app.Log("手动重载配置: " + (ok ? "成功" : "失败"));
-                ApplyHotkey();      // 重载也可能改了 hotkey=
-                TrayTip("RunEver", ok ? "配置已重载" : "重载失败，见日志",
-                    ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                if (_app == null) return;
+                var vals = AutoConfStore.Read(Path.Combine(_root, "config", "auto.conf"));
+                if (vals == null) return;
+
+                int level = 1;
+                string v;
+                int n;
+                if (vals.TryGetValue("loglevel", out v) && int.TryParse((v ?? "").Trim(), out n))
+                    level = n;
+
+                if (vals.TryGetValue("log", out v))
+                {
+                    string t = (v ?? "").Trim();
+                    bool on = !(t == "0" || t.Equals("false", StringComparison.OrdinalIgnoreCase));
+                    if (!on) level = 0;
+                    else if (level <= 0) level = 1;
+                }
+
+                if (level == 0)
+                {
+                    // 关：先留一行"为什么之后没有了"，再静音（否则用户以为日志坏了）
+                    _app.Log("日志开关即时生效：改为不写日志（之后不会再有新行）");
+                    _app.LogLevel = 0;
+                }
+                else
+                {
+                    _app.LogLevel = level;
+                    _app.Log("日志开关即时生效：LogLevel=" + level);
+                }
             }
             catch (Exception ex)
             {
-                _app.Log("重载异常: " + ex.Message);
+                try { _app.Log("⚠ 应用日志开关失败: " + ex.Message); } catch { }
             }
+        }
+
+        /// <summary>
+        /// 手动重载配置。
+        /// ★ B4b-10：**失败要退回旧实例**。原实现把新实例直接赋给 `_app` 再调 `Init()`，
+        ///   配置有语法错时留下的是一台半初始化实例（成员全空）⇒ 接下来弹菜单"什么都没了"，
+        ///   而用户只是点了一下「重载配置」。
+        /// ★ 仍是"先换再验、失败换回"（不是先建候选再赋值）：同一线程同步执行，中间没有
+        ///   用户可观察的间隙；也保住 `TrayApp.cs` 里"重载 = new + Init"这条契约文本
+        ///   （`--selftest-hotreload` 的 C12 是源码级断言）。
+        /// </summary>
+        private void ReloadConfig()
+        {
+            var previous = _app;
+            bool ok = false;
+            try
+            {
+                _app = new RunEverApp(_root);
+                ok = _app.Init();
+            }
+            catch (Exception ex)
+            {
+                try { previous.Log("重载异常: " + ex.Message); } catch { }
+            }
+
+            if (!ok)
+            {
+                // 失败：把旧实例换回来（菜单照常能弹），绝不把半成品留在位子上
+                _app = previous;
+                try { _app.Log("⚠ 重载失败，继续使用原来的配置实例"); } catch { }
+                TrayTip("RunEver 重载失败",
+                    "配置可能有语法错误，已继续使用上一次可用的配置。\n"
+                    + "详情见 state\\runever-cs.log", ToolTipIcon.Warning);
+                return;
+            }
+
+            _app.UserNotify = msg => TrayTipThreadSafe("RunEver 执行失败", msg, ToolTipIcon.Warning);
+            _app.UserNotifyTitled = (title, msg) => TrayTipThreadSafe(title, msg, ToolTipIcon.Info);
+            _app.Log("手动重载配置: 成功");
+            ApplyHotkey();      // 重载也可能改了 hotkey=
+            TrayTip("RunEver", "配置已重载", ToolTipIcon.Info);
         }
 
         // ============================================================
@@ -519,29 +1082,75 @@ namespace RunEverCs
                 var want = LoadHotkey();
                 if (_hotkey != null && want.Text == _hotkey.Text) return;
 
+                var old = _hotkey;      // ★ B4b-5：失败时要能退回它
                 UnregisterHotKey(_msgWnd.Handle, HOTKEY_ID);
                 _hotkeyOk = RegisterHotKey(_msgWnd.Handle, HOTKEY_ID,
                     want.Modifiers | HotkeySpec.MOD_NOREPEAT, want.Vk);
 
-                string from = _hotkey == null ? "(无)" : _hotkey.Text;
-                _hotkey = want;
+                string from = old == null ? "(无)" : old.Text;
 
                 if (_hotkeyOk)
                 {
+                    _hotkey = want;
                     _app.Log("热键重设: " + from + " → " + want.Describe());
                     TrayTip("RunEver 热键已改", "新热键：" + want.Text, ToolTipIcon.Info);
+                    return;
                 }
-                else
+
+                // ---- 失败：回滚 ----
+                // ★ B4b-5：旧实现只 `UnregisterHotKey` 就宣告失败 ⇒ 从此**一个热键都没有**
+                //   （用户改错一次就永久失去弹菜单的方式），而且提示是个会被下一条气泡顶掉的气泡。
+                //   现在：① 重新注册旧键；② 把 auto.conf 的 hotkey 值改回旧键（重启后也可用）；
+                //   ③ 用**模态对话框**告知（不会被别的气泡顶掉，用户一定看见）。
+                int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+                string oldText = old == null ? "" : old.Text;
+
+                _hotkeyOk = false;
+                if (old != null)
                 {
-                    int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
-                    _app.Log("⚠ 热键重设失败: " + want.Text + " err=" + err + "（可能被占用）");
-                    TrayTip("RunEver 热键注册失败",
-                        want.Text + " 可能被其它程序占用，请在设置里换一个。", ToolTipIcon.Warning);
+                    _hotkeyOk = RegisterHotKey(_msgWnd.Handle, HOTKEY_ID,
+                        old.Modifiers | HotkeySpec.MOD_NOREPEAT, old.Vk);
                 }
+                _hotkey = old;
+
+                _app.Log("⚠ 热键重设失败: " + want.Text + " err=" + err + "（可能被占用）"
+                    + "；已回滚到 " + (oldText.Length > 0 ? oldText : "(无)"));
+
+                if (oldText.Length > 0) RestoreHotkeyInConf(oldText);
+
+                MessageBox.Show(
+                    "新热键 " + want.Text + " 注册失败（多半被其它程序占用）。\n\n"
+                    + (oldText.Length > 0
+                        ? "已恢复原来的热键：" + oldText
+                          + (_hotkeyOk ? "（可正常使用）" : "（但它现在也注册不上，请重启托盘或换个热键）")
+                        : "当前没有可用热键，请换一个。")
+                    + "\n\nauto.conf 里的 hotkey 也已改回原值。",
+                    "RunEver 热键未生效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             catch (Exception ex)
             {
                 _app.Log("⚠ 应用热键异常: " + ex.Message);
+            }
+        }
+
+        /// <summary>把 auto.conf 的 hotkey 改回旧值（写盘失败只记日志 —— 已注册不上，不能连提示也吞掉）。</summary>
+        private void RestoreHotkeyInConf(string oldText)
+        {
+            try
+            {
+                string conf = Path.Combine(_root, "config", "auto.conf");
+                var vals = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    { "hotkey", oldText }
+                };
+                var r = AutoConfStore.Write(conf, vals, null, _root);
+                _app.Log(r.Ok
+                    ? "热键已回写 auto.conf: hotkey=" + oldText
+                    : "⚠ 热键回写 auto.conf 失败：" + r.Error);
+            }
+            catch (Exception ex)
+            {
+                _app.Log("⚠ 热键回写 auto.conf 异常：" + ex.Message);
             }
         }
 
@@ -588,7 +1197,8 @@ namespace RunEverCs
         // ============================================================
         private void RefreshPathCache()
         {
-            if (_cacheBusy)
+            // ★ B4b-7：单飞 —— 设置页可能正在刷同一份缓存（进程级闸在 PathCacheRefresh 里）
+            if (_cacheBusy || PathCacheRefresh.IsRunning)
             {
                 TrayTipThreadSafe("RunEver", "路径缓存正在构建中，请稍候…", ToolTipIcon.Info);
                 return;
@@ -672,7 +1282,7 @@ namespace RunEverCs
                         _app.Log("SYNC 托盘：未配置 WebDAV，已跳过（未动任何文件）");
                         if (!fromStartup)
                             TrayTipThreadSafe("RunEver",
-                                "未配置 WebDAV，已跳过同步。\n到「设置 → 常规 → 同步」里填写地址即可。",
+                                "未配置 WebDAV，已跳过同步。\n到「设置 → 诊断 → 同步（WebDAV）」里填写服务器地址即可。",
                                 ToolTipIcon.Info);
                         return;
                     }
@@ -756,11 +1366,25 @@ namespace RunEverCs
                         if (!string.IsNullOrEmpty(rdir) && !Directory.Exists(rdir))
                             Directory.CreateDirectory(rdir);
                         File.WriteAllText(rf, rep.Render(), new UTF8Encoding(false));
+
+                        // ★ B4b-9：留痕 —— 一行人话结论落到 state\selfcheck-last.txt，
+                        //   设置页「诊断」与下次开窗都能读到"上次检查于几点、结果如何"。
+                        File.WriteAllText(Path.Combine(_root, "state", "selfcheck-last.txt"),
+                            rep.LastCheckLine() + Environment.NewLine, new UTF8Encoding(false));
+
+                        // ★ B5-6：**已确认缺失**时才生成安装清单（不自动装、不弹 UAC、不跑 choco）；
+                        //   窗口里会给「打开清单」按钮，路径固定 state\selfcheck-choco.bat。
+                        if (rep.ChocoCommands().Count > 0)
+                            File.WriteAllText(Path.Combine(_root, "state", "selfcheck-choco.bat"),
+                                rep.BuildBat(), new UTF8Encoding(false));
                     }
                     catch { }
 
-                    TrayTipThreadSafe("RunEver 全盘自检完成", rep.SummaryLine(),
-                        (rep.Missing > 0 || rep.Unknown > 0) ? ToolTipIcon.Warning : ToolTipIcon.Info);
+                    // ★ B5-1/3：气泡用人话（机器字段版仍写日志与报告文件）
+                    TrayTipThreadSafe("RunEver 全盘自检完成", rep.HumanSummary(),
+                        rep.BackendTrusted()
+                            ? (rep.Missing + rep.Unknown > 0 ? ToolTipIcon.Warning : ToolTipIcon.Info)
+                            : ToolTipIcon.Warning);
 
                     ShowSelfCheckWindow(rep);
                 }
@@ -832,8 +1456,15 @@ namespace RunEverCs
             {
                 string reg = Path.Combine(_root, "state", "plugins.json");
                 if (!File.Exists(reg)) RefreshPlugins();
-                if (File.Exists(reg)) OpenPath(reg);
-                else _app.Log("插件登记文件缺失，且刷新失败");
+                if (File.Exists(reg)) OpenPath(reg, "插件登记");
+                else
+                {
+                    // ★ B4b-6：刷新后仍没有 ⇒ 明确告诉用户文件路径与原因，不静默
+                    _app.Log("插件登记文件缺失，且刷新未生成：" + reg);
+                    TrayTipThreadSafe("RunEver 打不开插件登记",
+                        "插件登记文件还没生成：\n" + reg
+                        + "\n\n（多半是 config\\functions 下没有可用的插件）", ToolTipIcon.Warning);
+                }
             }
             catch (Exception ex)
             {
@@ -847,7 +1478,7 @@ namespace RunEverCs
                 + "根目录：" + _root + "\n"
                 + "热键：" + (_hotkey == null ? "(未设置)" : _hotkey.Describe())
                 + (_hotkeyOk ? "" : "  ⚠ 注册失败") + "\n"
-                + "开机自启：" + (IsAutoStartEnabled() ? "已开启" : "未开启") + "\n"
+                + "开机自启：" + AutoStartSummary() + "\n"
                 + "日志级别：" + _app.LogLevel + "\n"
                 + "日志文件：state\\runever-cs.log\n\n"
                 + "提示：按钮「重载配置」不会重启本程序。";
@@ -867,10 +1498,24 @@ namespace RunEverCs
             catch { }
         }
 
-        private void OpenPath(string p)
+        /// <summary>用系统默认程序打开一个文件/目录（label 仅用于日志与提示里说人话）。</summary>
+        private void OpenPath(string p, string label = null)
         {
+            string what = string.IsNullOrEmpty(label) ? "文件" : label;
             try
             {
+                // ★ B4b-6：不存在就明确说「哪个路径不存在」，不要静默失败。
+                //   原来 ShellExecute 对不存在的路径只是返回错误码，用户看到的是"点了没反应"。
+                bool exists = File.Exists(p) || Directory.Exists(p);
+                if (!exists)
+                {
+                    _app.Log("打开失败（" + what + "不存在）：" + p);
+                    TrayTipThreadSafe("RunEver 打不开" + what,
+                        what + "还不存在：\n" + p
+                        + "\n\n（还没生成 / 已被移动或删除）", ToolTipIcon.Warning);
+                    return;
+                }
+
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = p,
@@ -879,7 +1524,9 @@ namespace RunEverCs
             }
             catch (Exception ex)
             {
-                _app.Log("打开失败 " + p + ": " + ex.Message);
+                _app.Log("打开失败（" + what + "）" + p + ": " + ex.Message);
+                TrayTipThreadSafe("RunEver 打不开" + what,
+                    "路径：" + p + "\n原因：" + ex.Message, ToolTipIcon.Warning);
             }
         }
 

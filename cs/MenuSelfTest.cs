@@ -11,7 +11,7 @@ namespace RunEverCs
 {
     /// <summary>
     /// 菜单渲染自检（无窗口）：验证同名项共存、层级、图标。
-    /// 用法：RunEverCs.exe --selftest-menu &lt;menus.conf&gt; &lt;out.txt&gt;
+    /// 用法：RunEverCs.exe --selftest-menu &lt;menus.conf 或根目录&gt; &lt;out.txt&gt;
     ///
     /// ★ v8 最小改动（C2，为让 AC-4/AC-10 判据有效）：原来只把
     ///   `MenuBuilder.SelfTest` 的**字符串**追加进报告、从不检查内容 ⇒ 报告里出现
@@ -32,6 +32,11 @@ namespace RunEverCs
             if (args.Length < 3) return 2;
             string conf = args[1];
             string outFile = args[2];
+
+            // ★ B4a-2：参数口径放宽 —— 既接受 `<root>\config\menus.conf`，也接受根目录
+            //   （`--selftest-menu . out.txt` 与 `--selftest-menueditor <root> <out>` 口径一致）。
+            if (Directory.Exists(conf))
+                conf = System.IO.Path.Combine(conf, "config", "menus.conf");
 
             var sb = new StringBuilder();
             int rc = 0;
@@ -99,6 +104,27 @@ namespace RunEverCs
                 bool c4 = NativeMenu.TryConvertSpace(Win32.MSGF_MENU, 0x0101, ref m4);   // WM_KEYUP
                 sb.AppendLine((!c4 ? "[OK]   " : "[FAIL] ")
                     + "抬起事件不动：只改写按下（WM_KEYDOWN），避免重复触发");
+
+                // ============================================================
+                // ★ B4a-2（P0 体验）：菜单全空 ⇒ 禁用占位项
+                //   ① 空配置：MenuBuilder.ItemCount 必须为 0（保留"跳过空分组"的既有语义）
+                //   ② 占位项：真的进得去、文本对、状态带 MF_GRAYED（看得见但点不动）
+                // ============================================================
+                var emptyBuild = MenuBuilder.Build(new List<MenuGroup>());
+                sb.AppendLine((emptyBuild.ItemCount == 0 ? "[OK]   " : "[FAIL] ")
+                    + "空配置：可点条目=0（MenuBuilder 跳过空/无条目分组，既有语义不变）");
+
+                emptyBuild.Menu.AddItemDisabled("（没有可显示的条目）");
+                uint st = Win32.GetMenuState(emptyBuild.Menu.Handle, 0, Win32.MF_BYPOSITION);
+                bool grayed = (st & Win32.MF_GRAYED) != 0;
+                string phText = emptyBuild.Menu.GetItemText(0);
+                bool phOk = emptyBuild.Menu.Count() == 1
+                    && phText == "（没有可显示的条目）" && grayed;
+                sb.AppendLine((phOk ? "[OK]   " : "[FAIL] ")
+                    + "空菜单禁用占位项：项数=" + emptyBuild.Menu.Count()
+                    + " 文本=[" + phText + "]"
+                    + " 状态=0x" + st.ToString("X") + "（MF_GRAYED=" + grayed + "）");
+                emptyBuild.Menu.Dispose();
             }
             catch (Exception ex)
             {

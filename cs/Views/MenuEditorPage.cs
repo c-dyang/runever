@@ -59,6 +59,18 @@ namespace RunEverCs.Views
 
         private bool _dirty;
 
+        /// <summary>
+        /// ★ B4a-1：**配置是否真的读进来了**。`Reload()` 进来先置 false，`Parse()` 成功才置 true。
+        /// 为什么需要它：解析失败时 `_groups` 为空，而「保存」按钮原来没有联动 ⇒
+        /// 点一下就把 menus.conf 写成「0 组 0 条」（一键清空菜单，P0 数据事故）。
+        /// 现在是三道闸：① 按钮 `IsEnabled` 跟随本标志 ② `OnSave` 开头二次防御
+        /// ③ `MenuConfWriter.Save` 的兜底硬闸（兜住所有调用方）。
+        /// </summary>
+        private bool _loadOk;
+
+        /// <summary>「保存」按钮（B4a-1：`IsEnabled` 跟随 <see cref="_loadOk"/>）。</summary>
+        private Button _saveBtn;
+
         // ★ 折叠状态（**纯视图态**，不写进配置；按 MItem 记账 ⇒ 重建后不丢）+ 拖拽起手
         private readonly HashSet<MItem> _collapsed = new HashSet<MItem>();
         private Point _dragStart;
@@ -96,6 +108,26 @@ namespace RunEverCs.Views
 
         /// <summary>本分组"最外层"的 Level 基准（menus.conf 惯例 = 1）；Flatten 回写时统一加它。</summary>
         private int _baseLevel;
+
+        /// <summary>条目树的右键菜单（B2：项由 <see cref="TreeAction"/> 生成，点击只调 <see cref="DoTreeAction"/>）。</summary>
+        private ContextMenu _contextMenu;
+
+        /// <summary>
+        /// ★ B2：条目树的**结构动作**。按钮 / 右键菜单 / 键盘三个入口共用这一个枚举，
+        /// 三者都只调 <see cref="DoTreeAction"/>，任何一处都不许自己再实现一遍结构操作。
+        /// 声明顺序 = 右键菜单的显示顺序（<see cref="BuildTreeContextMenu"/> 按声明顺序生成）。
+        /// </summary>
+        internal enum TreeAction
+        {
+            AddChild,
+            Rename,
+            Delete,
+            MoveUp,
+            MoveDown,
+            Indent,
+            Outdent,
+            Duplicate
+        }
 
         public MenuEditorPage(string root)
         {
@@ -179,6 +211,9 @@ namespace RunEverCs.Views
             // ★ 2026-11-07 卡片化：分组从「纯文本两行」改成**卡片**
             //   （白底 + 圆角 + 细分隔线，选中态由容器样式的左侧绿条 + 浅绿底表达）。
             //   与设置页 SettingsKit 的卡片语言保持一致。
+            // ★ B1-2：横向滚动必须关掉 —— 默认 Auto 会用**无限宽**去测量 item，
+            //   于是 `TextWrapping=Wrap` 永远不换行，只会多出一条横向滚动条。
+            ScrollViewer.SetHorizontalScrollBarVisibility(_groupList, ScrollBarVisibility.Disabled);
             _groupList.ItemTemplate = BuildGroupCardTemplate();
             _groupList.ItemContainerStyle = BuildGroupItemStyle();
             _groupList.ToolTip = "双击可编辑分组（名称 / 分组依据 / 关键词）";
@@ -252,12 +287,15 @@ namespace RunEverCs.Views
                 Margin = new Thickness(0, 6, 0, 0)
             };
             DockPanel.SetDock(midBtns, Dock.Bottom);
-            midBtns.Children.Add(MkBtn("＋ 条目", "在当前分组新增条目", OnAddItem));
-            midBtns.Children.Add(MkBtn("－", "删除选中条目", OnDelItem));
-            midBtns.Children.Add(MkBtn("↑", "上移", (s, e) => MoveItem(-1)));
-            midBtns.Children.Add(MkBtn("↓", "下移", (s, e) => MoveItem(1)));
-            midBtns.Children.Add(MkBtn("⇥", "增加缩进（成为子项）", (s, e) => IndentItem(1)));
-            midBtns.Children.Add(MkBtn("⇤", "减少缩进", (s, e) => IndentItem(-1)));
+            // ★ B2：六个按钮**保留**（用户明确要求），但只调 DoTreeAction —— 不再自己实现结构操作。
+            midBtns.Children.Add(MkBtn("＋ 条目", "新建子项（Insert）：组头下 ⇒ 成为它的子项；普通条目 ⇒ 插在它后面",
+                (s, e) => DoTreeAction(TreeAction.AddChild)));
+            midBtns.Children.Add(MkBtn("－", "删除选中条目（Delete）", (s, e) => DoTreeAction(TreeAction.Delete)));
+            midBtns.Children.Add(MkBtn("↑", "上移（Alt+↑）", (s, e) => DoTreeAction(TreeAction.MoveUp)));
+            midBtns.Children.Add(MkBtn("↓", "下移（Alt+↓）", (s, e) => DoTreeAction(TreeAction.MoveDown)));
+            midBtns.Children.Add(MkBtn("⇥", "增加缩进（Tab，成为上一条的子项）",
+                (s, e) => DoTreeAction(TreeAction.Indent)));
+            midBtns.Children.Add(MkBtn("⇤", "减少缩进（Shift+Tab）", (s, e) => DoTreeAction(TreeAction.Outdent)));
             mid.Children.Add(midBtns);
 
             // ★ 2026-11-07：中栏从 TreeView 改为**递归 ItemsControl**。
@@ -291,6 +329,12 @@ namespace RunEverCs.Views
             _itemTree.PreviewMouseRightButtonDown += ItemTree_PreviewMouseRightButtonDown;
             _itemTree.MouseDoubleClick += ItemTree_MouseDoubleClick;
             _itemTree.MouseMove += ItemTree_MouseMove;
+            // ★ B2：右键菜单只做「生成项 + 转发动作」。选中被点节点仍在
+            //   PreviewMouseRightButtonDown 里（右键先选中 = 既有行为，保留）。
+            //   权威依据（WPF 路由）：ContextMenu 是元素属性，右键由 WPF 自动打开；
+            //   MenuItem.Click 是普通路由事件 ⇒ item 自己点自己即可，不需要容器。
+            _contextMenu = BuildTreeContextMenu();
+            _itemTree.ContextMenu = _contextMenu;
             _itemTree.DragOver += (s, e) =>
             {
                 // 2026-11-07：区分两种拖拽 —— 从资源管理器拖文件进来是「复制」，
@@ -401,16 +445,20 @@ namespace RunEverCs.Views
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = Brushes.Gray
             };
-            var saveBtn = new Button
+            _saveBtn = new Button
             {
                 Content = "保存到 menus.conf",
                 Width = 150,
                 Padding = new Thickness(8, 4, 8, 4),
-                Margin = new Thickness(8, 0, 0, 0)
+                Margin = new Thickness(8, 0, 0, 0),
+                IsEnabled = false      // ★ B4a-1：初始禁用，等 Reload() 解析成功才放开
             };
-            saveBtn.Click += OnSave;
-            DockPanel.SetDock(saveBtn, Dock.Right);
-            statusBar.Children.Add(saveBtn);
+            // ★ 禁用态默认不弹 ToolTip —— 这里必须打开，否则用户看到灰按钮却不知道为什么
+            //   （MS Learn：ToolTipService.ShowOnDisabled 附加属性）
+            ToolTipService.SetShowOnDisabled(_saveBtn, true);
+            _saveBtn.Click += OnSave;
+            DockPanel.SetDock(_saveBtn, Dock.Right);
+            statusBar.Children.Add(_saveBtn);
 
             var reloadBtn = new Button
             {
@@ -419,7 +467,8 @@ namespace RunEverCs.Views
                 Padding = new Thickness(8, 4, 8, 4),
                 Margin = new Thickness(8, 0, 0, 0)
             };
-            reloadBtn.Click += (s, e) => { Reload(); SetStatus("已重新加载", false); };
+            // ★ B4a-1：加载失败时 Reload() 已经写了红字原因，这里不能再盖成「已重新加载」
+            reloadBtn.Click += (s, e) => { Reload(); if (_loadOk) SetStatus("已重新加载", false); };
             DockPanel.SetDock(reloadBtn, Dock.Right);
             statusBar.Children.Add(reloadBtn);
 
@@ -487,30 +536,102 @@ namespace RunEverCs.Views
         // ============================================================
         public void Reload()
         {
+            Reload(-1, null);
+        }
+
+        /// <summary>
+        /// 重载配置。
+        /// ★ B4b-3：`keepGroupIndex` / `keepItemTitle` 用于保存后的"原地重载"——
+        ///   以前保存成功一律重载并选第 0 组第 0 条，正在编辑的第 30 条会跳走，
+        ///   用户得重新找一遍（保存动作把上下文弄丢了，纯属反人类）。
+        /// </summary>
+        public void Reload(int keepGroupIndex, string keepItemTitle)
+        {
+            // ★ B4a-1：**进来先假定没读进来** —— 只有 Parse() 真的成功才允许保存。
+            //   注意：失败时**故意不清 _groups**（不清空内存模型，避免一次瞬时读盘错误
+            //   把用户正在编的东西从视图里抹掉）。保存已被禁用 ⇒ 留着也不会写盘。
+            _loadOk = false;
+            UpdateSaveEnabled();
             try
             {
                 var p = new ConfParser(_confPath);
                 p.Parse();
                 _groups = p.Groups;
+                _loadOk = true;
                 _dirty = false;
-                FillGroups();
+                FillGroups(keepGroupIndex, keepItemTitle);
                 SetStatus("已加载 " + _groups.Count + " 个分组", false);
             }
             catch (Exception ex)
             {
-                SetStatus("加载失败：" + ex.Message, true);
+                SetStatus("加载失败：" + ex.Message
+                    + " —— 配置没读进来，已禁用「保存」（防止把 menus.conf 写成空白）。"
+                    + "先修好 config\\menus.conf（或从 menus.conf.bak.* 恢复），再点「放弃修改」重试。", true);
             }
+            finally
+            {
+                UpdateSaveEnabled();
+            }
+        }
+
+        /// <summary>
+        /// ★ B4a-1：「保存」按钮的可用性**唯一同步点** —— 跟着 `_loadOk` 走。
+        /// 禁用时给 ToolTip 说明原因（配合 `ToolTipService.ShowOnDisabled`）。
+        /// </summary>
+        private void UpdateSaveEnabled()
+        {
+            if (_saveBtn == null) return;
+            _saveBtn.IsEnabled = _loadOk;
+            _saveBtn.ToolTip = _loadOk
+                ? null
+                : "配置没读进来，已禁用保存（否则会把 menus.conf 写成空白）。"
+                  + "先修好 config\\menus.conf，再点「放弃修改」重试。";
         }
 
         private void FillGroups()
         {
+            FillGroups(-1, null);
+        }
+
+        private void FillGroups(int keepGroupIndex, string keepItemTitle)
+        {
             _groupList.Items.Clear();
             foreach (var g in _groups)
                 _groupList.Items.Add(new GroupRow(g));
-            if (_groupList.Items.Count > 0)
-                _groupList.SelectedIndex = 0;
-            else
+            if (_groupList.Items.Count == 0)
+            {
                 FillItems();
+                return;
+            }
+
+            int idx = (keepGroupIndex >= 0 && keepGroupIndex < _groupList.Items.Count)
+                ? keepGroupIndex : 0;
+            _groupList.SelectedIndex = idx;
+
+            // 分组选好后条目树已重建（SelectionChanged → FillItems → SelectNode(第一根)）；
+            // 这里再按标题回到原来那条。标题在同组内重复极少，找不到就停在第一条（不报错）。
+            if (!string.IsNullOrEmpty(keepItemTitle))
+            {
+                var hit = FindNodeByTitle(CurrentRoots(), keepItemTitle);
+                if (hit != null)
+                {
+                    SelectNode(hit.Item);
+                    SelectNode(hit);
+                    RevealNode(hit);
+                }
+            }
+        }
+
+        /// <summary>按标题深度优先找节点（B4b-3 恢复选中用）。</summary>
+        private static NodeRow FindNodeByTitle(IEnumerable<NodeRow> nodes, string title)
+        {
+            foreach (var n in nodes)
+            {
+                if (n.Item != null && n.Item.Title == title) return n;
+                var r = FindNodeByTitle(n.Children, title);
+                if (r != null) return r;
+            }
+            return null;
         }
 
         private void FillItems()
@@ -557,6 +678,19 @@ namespace RunEverCs.Views
         /// 视觉上就是「一团散沙」，这是用户说「设置面太丑」最直观的一条。
         /// fullRow=true 用于占位符这种本来就该占满整行的块。
         /// </summary>
+        /// <summary>
+        /// 「这个值明确是目录吗」（B4b-12 选选择器用）：空值不算、带扩展名的文件不算。
+        /// 判据只认三种硬信号：结尾是 \ 或 /、目录确实存在。
+        /// </summary>
+        private static bool LooksLikeDirectory(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            string t = s.Trim().Trim('"').Trim();
+            if (t.Length == 0) return false;
+            if (t.EndsWith("\\") || t.EndsWith("/")) return true;
+            try { return System.IO.Directory.Exists(t); } catch { return false; }
+        }
+
         private void AddField(string label, FrameworkElement control, bool fullRow = false)
         {
             if (fullRow)
@@ -611,9 +745,12 @@ namespace RunEverCs.Views
             // 快捷键
             // ★ 2026-11-07：快捷键改成**按键捕获**（按下即填），仍可手填。
             //   Backspace/Delete 清空；只接受单字符键（menus.conf 的 hotkey 本就是单字符）。
+            // ★ B4b-4：MaxLength 由 2 改 1 —— 这里的能力就是"一个字符"，留 2 只会让
+            //   手输 "ab" 这种非法值进配置；F1-F24 / Space 属于**全局热键**的能力，
+            //   本框按下时明确拒绝并给提示（提示文案与能力一致，不承诺做不到的事）。
             var tbKey = MkEdit(it.Hotkey);
-            tbKey.MaxLength = 2;
-            tbKey.ToolTip = "按一个键即可填入（Backspace 清空）；也可直接输入";
+            tbKey.MaxLength = 1;
+            tbKey.ToolTip = "按一个键即可填入（单字符；Backspace 清空）；也可直接输入。F1-F24 / Space 请到设置里设为全局热键";
             tbKey.PreviewKeyDown += (s, e) =>
             {
                 var key = e.Key == System.Windows.Input.Key.System
@@ -630,13 +767,23 @@ namespace RunEverCs.Views
                 string ch = SettingsKit.KeyToHotkeyChar(key);
                 if (ch != null)
                 {
-                    tbKey.Text = ch;
+                    if (ch.Length == 1)
+                    {
+                        tbKey.Text = ch;
+                    }
+                    else
+                    {
+                        // F1-F24 / Space：条目快捷键用不上（配置里只存一个字符）
+                        tbKey.ToolTip = ch + " 是功能键，条目快捷键只支持单字符；"
+                            + "要改弹出热键请到「设置 → 触发与行为」。";
+                    }
                     e.Handled = true;      // 吃掉原按键，避免同时输入原始字符
                 }
             };
             tbKey.TextChanged += (s, e) =>
             {
-                it.Hotkey = tbKey.Text.Trim();
+                // ★ 只去首尾空白，且不把"纯空格"抹成空串（与 SettingsKit.TrimHotkeyText 同口径）
+                it.Hotkey = SettingsKit.TrimHotkeyText(tbKey.Text);
                 RefreshGrid(); MarkDirty();
             };
             AddField("快捷键", tbKey);
@@ -689,7 +836,15 @@ namespace RunEverCs.Views
                 string curFile, curArgs;
                 TargetSplit.Split(it.Target, out curFile, out curArgs);
 
-                fileBox = new PathBox(PathBox.Mode.PathAny, null, "选择程序或文件", ProgramCandidates());
+                // ★ B4b-12：按上下文选选择器 —— 空值 / 不像目录 ⇒ **文件**选择器（过滤 *.exe;*.lnk）；
+                //   当前值确实是目录（存在，或以 \ / 结尾）⇒ 文件夹选择器。
+                //   原来固定 PathAny，而 PathAny 的判据是"有扩展名且不含空格"，于是
+                //   清空后点「浏览…」弹的是**选文件夹**，根本选不到 exe（用户实报）。
+                PathBox.Mode pickMode = LooksLikeDirectory(curFile)
+                    ? PathBox.Mode.Folder : PathBox.Mode.File;
+                fileBox = new PathBox(pickMode,
+                    "程序或文件 (*.exe;*.lnk)|*.exe;*.lnk|所有文件 (*.*)|*.*",
+                    "选择程序或文件", ProgramCandidates());
                 fileBox.Text = curFile;          // 先赋初值：此时尚未订阅 Changed
                 lastFocusBox = fileBox.Box;
                 fileBox.Box.GotKeyboardFocus += (s, e) => lastFocusBox = fileBox.Box;
@@ -1120,7 +1275,46 @@ namespace RunEverCs.Views
         // ============================================================
         // 条目操作
         // ============================================================
-        private void OnAddItem(object sender, RoutedEventArgs e)
+        // ============================================================
+        // ★ B2 结构操作抽象层（按钮 / 右键 / 键盘 **三入口归一**）
+        //
+        //   唯一分发点 = `DoTreeAction`。上面六个按钮、`BuildTreeContextMenu()` 生成的
+        //   右键项、`ItemTree_PreviewKeyDown` 的按键映射，**全都只调它**；
+        //   下面每个 `*Core` 只被 `DoTreeAction` 调用（grep 可核）。
+        //
+        //   为什么必须归一：结构操作有"Flatten → RefreshGrid → 重新 SelectNode"这套
+        //   收尾契约（顺序错了就丢选中 / 丢焦点 / 视图与模型不一致）。三个入口各写一遍
+        //   就是三份收尾逻辑，今天已经因为"文件拖入那条路少写了选中"出过 P0（见 DropFiles）。
+        // ============================================================
+
+        /// <summary>
+        /// 执行一个结构动作（**唯一实现**）。产品路径（按钮 / 右键 / 键盘）走这个重载 ⇒ 破坏性操作先问。
+        /// </summary>
+        internal void DoTreeAction(TreeAction a)
+        {
+            DoTreeAction(a, true);
+        }
+
+        /// <summary>
+        /// 唯一实现本体。<paramref name="ask"/> = 破坏性操作是否弹确认框
+        /// （自检缝传 false：无人值守不能弹窗；产品路径恒为 true）。
+        /// </summary>
+        private void DoTreeAction(TreeAction a, bool ask)
+        {
+            switch (a)
+            {
+                case TreeAction.AddChild: AddChildCore(); break;
+                case TreeAction.Rename: BeginRenameItem(); break;
+                case TreeAction.Delete: DeleteItemCore(ask); break;
+                case TreeAction.MoveUp: MoveItemCore(-1); break;
+                case TreeAction.MoveDown: MoveItemCore(1); break;
+                case TreeAction.Indent: IndentItemCore(1); break;
+                case TreeAction.Outdent: IndentItemCore(-1); break;
+                case TreeAction.Duplicate: DuplicateItemCore(); break;
+            }
+        }
+
+        private void AddChildCore()
         {
             var g = SelectedGroup();
             if (g == null)
@@ -1175,7 +1369,8 @@ namespace RunEverCs.Views
             MarkDirty();
         }
 
-        private void OnDelItem(object sender, RoutedEventArgs e)
+        /// <summary>删除（<paramref name="ask"/>=false 时跳过确认框，自检用）。</summary>
+        private void DeleteItemCore(bool ask)
         {
             var g = SelectedGroup();
             var sel = SelectedNode();
@@ -1185,14 +1380,96 @@ namespace RunEverCs.Views
                 return;
             }
 
-            int total = CountNodes(sel);
-            string msg = total > 1
-                ? "删除「" + sel.Item.Title + "」及其 " + (total - 1) + " 个子项？"
-                : "删除条目「" + sel.Item.Title + "」？";
-            if (MessageBox.Show(msg, "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Warning)
-                != MessageBoxResult.Yes) return;
+            if (ask)
+            {
+                int total = CountNodes(sel);
+                string msg = total > 1
+                    ? "删除「" + sel.Item.Title + "」及其 " + (total - 1) + " 个子项？"
+                    : "删除条目「" + sel.Item.Title + "」？";
+                if (MessageBox.Show(msg, "确认删除", MessageBoxButton.YesNo, MessageBoxImage.Warning)
+                    != MessageBoxResult.Yes) return;
+            }
 
             DeleteNodeCore(sel);
+        }
+
+        /// <summary>
+        /// 复制条目（含整棵子树）⇒ 插到被复制节点的**后面**（同层）。
+        /// 副本标题加「副本」后缀；**副本不带快捷键**（同一个键挂两条，运行时只会命中一条，
+        /// 用户看不出哪条生效 —— 宁可留空让他自己填）。子项按原样深拷贝（标题不改）。
+        /// </summary>
+        private void DuplicateItemCore()
+        {
+            var g = SelectedGroup();
+            var sel = SelectedNode();
+            if (g == null || sel == null)
+            {
+                SetStatus("先选中要复制的条目", true);
+                return;
+            }
+
+            var copy = CloneSubtree(sel);
+            copy.Item.Title = sel.Item.Title + " 副本";
+
+            if (sel.Parent != null)
+            {
+                int idx = sel.Parent.Children.IndexOf(sel);
+                copy.Parent = sel.Parent;
+                sel.Parent.Children.Insert(idx + 1, copy);
+            }
+            else
+            {
+                var roots = CurrentRoots();
+                int idx = roots.IndexOf(sel);
+                copy.Parent = null;
+                roots.Insert(idx + 1, copy);
+                _itemTree.ItemsSource = roots;
+            }
+
+            Flatten();
+            RefreshGrid();
+            SelectNode(copy.Item);
+            RefreshPreview();
+            MarkDirty();
+            SetStatus("已复制「" + sel.Item.Title + "」⇒「" + copy.Item.Title + "」"
+                + (copy.Children.Count > 0 ? "（含 " + copy.Children.Count + " 个直接子项）" : ""), false);
+        }
+
+        /// <summary>深拷贝一棵子树（新 MItem + 新 NodeRow；快捷键一律清空，见 DuplicateItemCore）。</summary>
+        private NodeRow CloneSubtree(NodeRow src)
+        {
+            var it = src.Item.Clone();
+            it.Hotkey = "";
+            var n = new NodeRow(this, it);
+            foreach (var c in src.Children)
+            {
+                var cc = CloneSubtree(c);
+                cc.Parent = n;
+                n.Children.Add(cc);
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// 重命名 = 把输入点定位到字段编辑区的「标题」框并全选（**不改模型**）。
+        /// 为什么不做输入对话框：标题的唯一输入口就是这个 TextBox（TextChanged 已写回模型 +
+        /// MarkDirty），再开一个对话框等于第二份改名实现；双击条目本来也是跳这里，行为一致。
+        /// </summary>
+        private void BeginRenameItem()
+        {
+            var g = SelectedGroup();
+            var sel = SelectedNode();
+            if (g == null || sel == null)
+            {
+                SetStatus("先选中要重命名的条目", true);
+                return;
+            }
+
+            SelectNode(sel.Item);                              // 同步 _selNode / _selectedItem
+            if (!ReferenceEquals(_lastPanelItem, sel.Item))    // 面板已经显示它就不必重建（防丢焦点）
+                BuildFieldPanel(sel.Item);
+            FocusTitleBox();
+            SetStatus("在右侧「标题」框里改名（改完自动写回，记着点保存）", false);
         }
 
         /// <summary>
@@ -1238,7 +1515,7 @@ namespace RunEverCs.Views
             return c;
         }
 
-        private void MoveItem(int dir)
+        private void MoveItemCore(int dir)
         {
             var g = SelectedGroup();
             var sel = SelectedNode();
@@ -1267,7 +1544,7 @@ namespace RunEverCs.Views
         /// ★ v9：直接在树上搬家 ⇒ 结构天然合法（原"改 Level + 事后校验"的写法不再需要，
         ///   但 <see cref="Flatten"/> 仍会断言一次不变式）。
         /// </summary>
-        private void IndentItem(int delta)
+        private void IndentItemCore(int delta)
         {
             var g = SelectedGroup();
             var sel = SelectedNode();
@@ -1418,6 +1695,9 @@ namespace RunEverCs.Views
             name.SetValue(TextBlock.FontSizeProperty, 13.0);
             name.SetValue(TextBlock.FontWeightProperty, FontWeights.SemiBold);
             name.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+            // ★ B1-3：名称保持单行省略（卡片不被超高内容撑爆），但 ToolTip 给全名。
+            //   `FrameworkElement.ToolTip` 是依赖属性 ⇒ 可以直接绑数据源属性。
+            name.SetBinding(FrameworkElement.ToolTipProperty, new System.Windows.Data.Binding("Group.Name"));
             sp.AppendChild(name);
 
             var basis = new FrameworkElementFactory(typeof(TextBlock));
@@ -1425,7 +1705,10 @@ namespace RunEverCs.Views
             basis.SetValue(TextBlock.ForegroundProperty, SettingsKit.TextSecondary);
             basis.SetValue(TextBlock.FontSizeProperty, 11.0);
             basis.SetValue(TextBlock.MarginProperty, new Thickness(0, 2, 0, 0));
-            basis.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+            // ★ B1-2：依据要**换行显示完整**，不许截断。
+            //   TextTrimming 只在 TextWrapping=NoWrap 时才截断（MS Learn《How to: Enable Text Trimming》），
+            //   所以这里去掉 trimming、改 Wrap —— 卡片高度随内容自适应（StackPanel 无固定高）。
+            basis.SetValue(TextBlock.TextWrappingProperty, TextWrapping.Wrap);
             sp.AppendChild(basis);
 
             tpl.VisualTree = sp;
@@ -1767,23 +2050,173 @@ namespace RunEverCs.Views
             }
         }
 
-        /// <summary>树里 Ctrl+F ⇒ 聚焦搜索框（WPF 原生 PreviewKeyDown 隧道，先于 TreeView 自己的按键处理）。</summary>
+        // ============================================================
+        // ★ B2 入口②：右键菜单（项由枚举生成）
+        //   权威依据：
+        //   · FrameworkElement.ContextMenu —— 元素属性，右键由 WPF 自动打开（气泡路由事件 ContextMenuOpening 可取消）
+        //     https://learn.microsoft.com/zh-cn/dotnet/api/system.windows.frameworkelement.contextmenuopening
+        //   · MenuItem.Click 是普通 RoutedEvent（不是命令），MenuItem 实例自己就能 RaiseEvent
+        //     https://learn.microsoft.com/zh-cn/dotnet/api/system.windows.controls.menuitem.click
+        // ============================================================
+
+        /// <summary>按枚举**声明顺序**生成右键项；点击只调 <see cref="DoTreeAction"/>。</summary>
+        private ContextMenu BuildTreeContextMenu()
+        {
+            var cm = new ContextMenu();
+            foreach (TreeAction a in Enum.GetValues(typeof(TreeAction)))
+            {
+                var act = a;   // ★ 必须拷贝：闭包捕获的是变量本身，直接用 a 会让所有项都指向最后一项
+                // ★ 必须写全名：本文件同时 using 了 RunEverCs.Models ⇒ MenuItem 有歧义
+                var mi = new System.Windows.Controls.MenuItem
+                {
+                    Header = ActionLabel(act),
+                    InputGestureText = ActionGesture(act),
+                    ToolTip = ActionTip(act)
+                };
+                mi.Click += (s, e) => DoTreeAction(act);
+
+                // 分三组：改名词 / 改结构 / 复制
+                if (act == TreeAction.Delete || act == TreeAction.Duplicate)
+                    cm.Items.Add(new Separator());
+                cm.Items.Add(mi);
+            }
+            return cm;
+        }
+
+        private static string ActionLabel(TreeAction a)
+        {
+            switch (a)
+            {
+                case TreeAction.AddChild: return "新建子项";
+                case TreeAction.Rename: return "重命名";
+                case TreeAction.Delete: return "删除";
+                case TreeAction.MoveUp: return "上移";
+                case TreeAction.MoveDown: return "下移";
+                case TreeAction.Indent: return "缩进";
+                case TreeAction.Outdent: return "反缩进";
+                case TreeAction.Duplicate: return "复制条目";
+            }
+            return a.ToString();
+        }
+
+        private static string ActionGesture(TreeAction a)
+        {
+            switch (a)
+            {
+                case TreeAction.AddChild: return "Insert";
+                case TreeAction.Rename: return "F2";
+                case TreeAction.Delete: return "Delete";
+                case TreeAction.MoveUp: return "Alt+↑";
+                case TreeAction.MoveDown: return "Alt+↓";
+                case TreeAction.Indent: return "Tab";
+                case TreeAction.Outdent: return "Shift+Tab";
+            }
+            return "";   // 复制条目：故意不给全局键（避免与系统/其它编辑器的习惯冲突）
+        }
+
+        private static string ActionTip(TreeAction a)
+        {
+            switch (a)
+            {
+                case TreeAction.AddChild: return "选中组头 ⇒ 成为它的子项；选中普通条目 ⇒ 插在它后面（同层）";
+                case TreeAction.Rename: return "跳到右侧「标题」框改名（与双击条目同一处输入）";
+                case TreeAction.Delete: return "删除选中条目及其全部子项（会先确认）";
+                case TreeAction.Indent: return "成为同层上一条的子项（同级第一条无法缩进）";
+                case TreeAction.Outdent: return "升到父项的同层，排在父项之后";
+                case TreeAction.Duplicate: return "复制这一条（含子项）到它后面；副本不带快捷键";
+            }
+            return null;
+        }
+
+        // ============================================================
+        // ★ B2 入口③：键盘（PreviewKeyDown = 隧道事件，先于 TreeView 自己的按键处理）
+        //   权威依据：PreviewKeyDown 路由策略 = Tunneling，对应冒泡事件 KeyDown，
+        //   两者共用同一份事件数据 ⇒ 这里 Handled=true 后 TreeView 的默认行为（Tab 跳焦点、
+        //   ↑↓ 折叠/移动选中）不会再跑。
+        //   https://learn.microsoft.com/zh-cn/dotnet/api/system.windows.uielement.previewkeydown
+        //   Alt 组合键：WPF 把 e.Key 置为 Key.System，真实键在 e.SystemKey
+        //   https://learn.microsoft.com/zh-cn/dotnet/desktop/wpf/advanced/input-overview
+        // ============================================================
+
         private void ItemTree_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+
+            if (ctrl && e.Key == Key.F)
             {
                 if (_searchBox != null) { _searchBox.Focus(); _searchBox.SelectAll(); }
                 e.Handled = true;
+                return;
             }
+
+            Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+            var a = KeyToAction(key, Keyboard.Modifiers, IsFieldEditorFocused());
+            if (!a.HasValue) return;
+
+            e.Handled = true;      // 先吃掉，再执行（执行里会重建树，事件源可能已失效）
+            DoTreeAction(a.Value);
         }
+
+        /// <summary>
+        /// 键盘 → 动作的**唯一映射**（纯函数 ⇒ 自检可无人值守断言，不必造 WPF 事件参数）。
+        /// <paramref name="editorFocused"/> = 焦点在字段编辑框里 ⇒ **一律返回 null**：
+        /// 否则用户在标题框里按 Delete 会把整条删掉（"打字删条目"）。
+        /// </summary>
+        internal static TreeAction? KeyToAction(Key key, ModifierKeys mods, bool editorFocused)
+        {
+            if (editorFocused) return null;
+
+            bool ctrl = (mods & ModifierKeys.Control) == ModifierKeys.Control;
+            bool alt = (mods & ModifierKeys.Alt) == ModifierKeys.Alt;
+            bool shift = (mods & ModifierKeys.Shift) == ModifierKeys.Shift;
+
+            if (ctrl) return null;     // Ctrl+X 之类留给系统 / 其它功能（Ctrl+F 在调用方）
+
+            switch (key)
+            {
+                case Key.Delete: return TreeAction.Delete;
+                case Key.F2: return TreeAction.Rename;
+                case Key.Insert: return TreeAction.AddChild;
+                case Key.Up: return alt ? TreeAction.MoveUp : (TreeAction?)null;
+                case Key.Down: return alt ? TreeAction.MoveDown : (TreeAction?)null;
+                case Key.Tab: return shift ? TreeAction.Outdent : TreeAction.Indent;
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 焦点是否落在**字段编辑框**（TextBox / ComboBox 及其内部子元素）里。
+        /// 说明：焦点在右侧字段区时，按键的隧道路由本来就不经过 `_itemTree`（树不是祖先），
+        /// 这一层是**双保险** —— 防止以后把字段面板挪进树里、或树里再嵌编辑框时静默回归。
+        /// </summary>
+        private static bool IsFieldEditorFocused()
+        {
+            var d = Keyboard.FocusedElement as DependencyObject;
+            while (d != null)
+            {
+                if (d is TextBox || d is ComboBox) return true;
+
+                DependencyObject parent = null;
+                var visual = d as Visual;
+                var v3d = d as System.Windows.Media.Media3D.Visual3D;
+                if (visual != null || v3d != null)
+                {
+                    try { parent = VisualTreeHelper.GetParent(d); }
+                    catch (InvalidOperationException) { parent = null; }
+                }
+                if (parent == null) parent = LogicalTreeHelper.GetParent(d);
+                d = parent;
+            }
+            return false;
+        }
+
         private void ItemTree_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
             var node = NodeAt(e.OriginalSource as DependencyObject);
             if (node == null) return;
-            _selNode = node;
-            _selectedItem = node.Item;
-            BuildFieldPanel(_selectedItem);
-            FocusTitleBox();
+            // 双击 = 改名入口（与 F2 / 右键「重命名」同一份实现，见 BeginRenameItem）
+            SelectNode(node.Item);
+            DoTreeAction(TreeAction.Rename);
             e.Handled = true;
         }
 
@@ -1971,7 +2404,7 @@ namespace RunEverCs.Views
             {
                 if (anchor != null)
                 {
-                    // 拖到组头 ⇒ 作为它的子项（与 OnAddItem 的组头分支一致）
+                    // 拖到组头 ⇒ 作为它的子项（与 AddChildCore 的组头分支一致）
                     foreach (var node in made)
                     {
                         node.Parent = anchor;
@@ -2113,13 +2546,26 @@ namespace RunEverCs.Views
         // ============================================================
         private void OnSave(object sender, RoutedEventArgs e)
         {
+            // ★ B4a-1 第二道闸：按钮禁用了，但代码路径（键盘快捷键 / 未走 UI 的调用）
+            //   仍可能走到这里 —— 这里再判一次，绝不拿"没读进来的空集合"去写盘。
+            if (!_loadOk)
+            {
+                SetStatus("配置没读进来，已拒绝保存（否则会把 menus.conf 写成空白）。"
+                    + "先修好 config\\menus.conf，再点「放弃修改」重试。", true);
+                return;
+            }
+
+            // ★ B4b-3：先记住"我在哪"（分组下标 + 条目标题），重载后回到原处
+            int keepGroup = _groupList == null ? -1 : _groupList.SelectedIndex;
+            string keepTitle = (_selectedItem == null) ? null : _selectedItem.Title;
+
             string msg;
             bool ok = _writer.Save(_groups, out msg);
             SetStatus(msg.Replace("\n", "  |  "), !ok);
             if (ok)
             {
                 _dirty = false;
-                Reload();
+                Reload(keepGroup, keepTitle);
 
                 // ★ D-5：目标为空**不阻止保存**（配置格式零变更 ⇒ 不加新字段/新校验存储），
                 //   但保存后**必须在状态行给出警告**（不静默、不硬拦 —— I-4 风格）。
@@ -2180,7 +2626,14 @@ namespace RunEverCs.Views
         // ============================================================
         private class GroupRow
         {
-            public MenuGroup Group;
+            /// <summary>
+            /// ★ 必须是**属性**，不能是 public 字段：WPF 绑定只认 public 属性，
+            ///   绑到字段时**静默取空**（无异常，错误只出现在 trace 里）——
+            ///   模板里 `Binding("Group.Name")` 曾因此让左栏第一行整片空白（B1-1）。
+            ///   MS Learn: https://learn.microsoft.com/en-us/answers/a/1168021
+            /// </summary>
+            public MenuGroup Group { get; private set; }
+
             public GroupRow(MenuGroup g) { Group = g; }
 
             /// <summary>分组依据显示：类型 + 关键词（否则"显示不全"）。</summary>
@@ -2310,8 +2763,11 @@ namespace RunEverCs.Views
         // ============================================================
         // ★ 测试缝（`--selftest-menueditor` 用）
         //   把「结构操作」暴露给同程序集的**无人值守**自检 —— 不经 UI 事件、不弹对话框；
-        //   产品路径与自检路径调用的**是同一份实现**（OnAddItem / DeleteNodeCore / MoveItem /
-        //   IndentItem / ApplyDropCore），不存在"测试缝里另有一套逻辑"。
+        //   产品路径与自检路径调用的**是同一份实现**（DoTreeAction / DeleteNodeCore /
+        //   ApplyDropCore / DropFiles），不存在"测试缝里另有一套逻辑"。
+        //
+        //   ★ B2 起：所有结构操作都从 `DoTreeAction` 走（`T_AddItem`/`T_Move`/`T_Indent`/
+        //   `T_Delete` 也改成转调它）—— 三条产品入口与自检入口共用同一个分发点。
         // ============================================================
         internal List<NodeRow> T_Roots() { return CurrentRoots(); }
         internal MenuGroup T_Group() { return SelectedGroup(); }
@@ -2325,10 +2781,74 @@ namespace RunEverCs.Views
         internal MItem T_Selected() { return _selectedItem; }
         internal NodeRow T_Find(MItem it) { return FindNode(CurrentRoots(), it); }
         internal void T_Select(MItem it) { SelectNode(it); }
-        internal void T_AddItem() { OnAddItem(null, null); }
-        internal void T_Delete() { var s = SelectedNode(); if (s != null) DeleteNodeCore(s); }
-        internal void T_Move(int dir) { MoveItem(dir); }
-        internal void T_Indent(int delta) { IndentItem(delta); }
+        internal void T_AddItem() { DoTreeAction(TreeAction.AddChild, false); }
+        internal void T_Delete() { DoTreeAction(TreeAction.Delete, false); }
+        internal void T_Move(int dir) { DoTreeAction(dir < 0 ? TreeAction.MoveUp : TreeAction.MoveDown, false); }
+        internal void T_Indent(int delta) { DoTreeAction(delta > 0 ? TreeAction.Indent : TreeAction.Outdent, false); }
+
+        /// <summary>
+        /// ★ B2 自检缝：**代表全部入口**驱动一个结构动作（按钮 / 右键 / 键盘调的是同一个
+        /// `DoTreeAction`；这里只跳过确认框）。
+        /// </summary>
+        internal void T_TreeAction(TreeAction a) { DoTreeAction(a, false); }
+
+        /// <summary>
+        /// ★ B2 自检缝：**真的去点右键菜单里的那一项**（走 MenuItem.Click 路由，不是直调动作）
+        /// ⇒ 证明「菜单项 → 动作」这根线是通的。返回是否找到该项。
+        /// </summary>
+        internal bool T_ClickMenu(string header)
+        {
+            if (_contextMenu == null) return false;
+            foreach (var o in _contextMenu.Items)
+            {
+                var mi = o as System.Windows.Controls.MenuItem;
+                if (mi == null) continue;
+                if (Convert.ToString(mi.Header) == header)
+                {
+                    mi.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.MenuItem.ClickEvent));
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>★ B2 自检缝：右键菜单里**动作项**的表头（跳过分隔符），用于断言「八项齐全且顺序对」。</summary>
+        internal List<string> T_MenuHeaders()
+        {
+            var list = new List<string>();
+            if (_contextMenu == null) return list;
+            foreach (var o in _contextMenu.Items)
+            {
+                var mi = o as System.Windows.Controls.MenuItem;
+                if (mi != null) list.Add(Convert.ToString(mi.Header));
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// ★ B2 自检缝：键盘入口的无 UI 版 —— 与 `ItemTree_PreviewKeyDown` 走**同一个**
+        /// `KeyToAction` 映射 + 同一个 `DoTreeAction`。返回实际执行的动作名（"none" = 未处理）。
+        /// </summary>
+        internal string T_Key(string keyName, string mods, bool editorFocused)
+        {
+            var key = (Key)Enum.Parse(typeof(Key), keyName);
+            var m = ModifierKeys.None;
+            if (!string.IsNullOrEmpty(mods))
+                foreach (var part in mods.Split(new[] { '+', '|' }, StringSplitOptions.RemoveEmptyEntries))
+                    m |= (ModifierKeys)Enum.Parse(typeof(ModifierKeys), part.Trim());
+
+            var a = KeyToAction(key, m, editorFocused);
+            if (!a.HasValue) return "none";
+            DoTreeAction(a.Value, false);
+            return a.Value.ToString();
+        }
+
+        /// <summary>★ B2 自检缝：字段面板当前展示的条目（重命名输入点绑定在谁身上的判据）。</summary>
+        internal MItem T_PanelItem() { return _lastPanelItem; }
+
+        /// <summary>★ B2 自检缝：字段面板「标题」框的当前文本。</summary>
+        internal string T_TitleBoxText() { return _titleBox == null ? null : _titleBox.Text; }
+
         internal void T_Drop(NodeRow src, NodeRow target, DropWhere where) { ApplyDropCore(src, target, where); }
         /// <summary>自检缝：外部拖文件入树（与产品路径同一个 `DropFiles`；只按后缀识别，路径不必存在）。</summary>
         internal void T_DropFiles(string[] paths, NodeRow anchor) { DropFiles(paths, anchor); }
@@ -2337,6 +2857,18 @@ namespace RunEverCs.Views
         internal void T_SelectGroup(int i) { if (i >= 0 && i < _groupList.Items.Count) _groupList.SelectedIndex = i; }
         internal int T_BaseLevel() { return _baseLevel; }
         internal string T_Status() { return _statusText.Text; }
+
+        /// <summary>自检缝（B4a-1）：配置是否真的读进来了。</summary>
+        internal bool T_LoadOk() { return _loadOk; }
+
+        /// <summary>自检缝（B4a-1）：「保存」按钮当前是否可用（应恒等于 T_LoadOk）。</summary>
+        internal bool T_SaveEnabled() { return _saveBtn != null && _saveBtn.IsEnabled; }
+
+        /// <summary>
+        /// 自检缝（B4a-1）：走**产品同一份** `OnSave`（含二次防御），返回状态行文本。
+        /// 用来证明「加载失败时连代码路径也进不去写盘」。
+        /// </summary>
+        internal string T_OnSave() { OnSave(null, null); return _statusText.Text; }
 
         private static string TypeStr(ActionType t)
         {

@@ -83,10 +83,7 @@ webdavDir=RunEver
 # 启动时自动同步：0 = 关（默认）/ 1 = 开（托盘就绪后异步跑，不拖慢启动）
 syncOnStart=0
 
-# 采集后端（2026-11-07）：ahk = CaptureRunner 子进程（约 250ms）/ native = 进程内 Win32+UIA（约 120ms）
-# 出问题改回 ahk 即可，无需重编译
-captureBackend=native
-
-# 菜单显示后端（2026-11-07）：win32 = TrackPopupMenu（原路径）/ wpf = WPF ContextMenu + MahApps 样式
-# 出问题改回 win32 即可，无需重编译
-uiBackend=wpf
+# ── 已取消的两个开关（2026-11-08 定案）──────────────────────────────
+# 旧版曾有 captureBackend（ahk / native）与 uiBackend（win32 / wpf）两个可切后端。
+# 现在固定：采集 = AHK 常驻管道（CaptureRunner.exe）、菜单 = Win32 TrackPopupMenu。
+# 旧配置里若还留着这两行，程序会忽略，不再生效（不是错误）。

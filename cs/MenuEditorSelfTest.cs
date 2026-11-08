@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Windows.Input;
 using RunEverCs.Models;
 using RunEverCs.Services;
 using RunEverCs.Views;
@@ -324,6 +325,124 @@ namespace RunEverCs
                 var srcAgain = File.ReadAllBytes(srcConf);
                 Chk("⑬ 真实 menus.conf 未被写（沙箱隔离）", BytesEqual(srcBytes, srcAgain),
                     "src=" + srcConf);
+
+                // ============================================================
+                // ⑱ B2：键盘 → 动作的**纯函数**映射（无窗口可断言；焦点在编辑框一律 null）
+                // ============================================================
+                Chk("⑱ Delete→Delete",
+                    MenuEditorPage.KeyToAction(Key.Delete, ModifierKeys.None, false) == MenuEditorPage.TreeAction.Delete, "");
+                Chk("⑱b F2→Rename",
+                    MenuEditorPage.KeyToAction(Key.F2, ModifierKeys.None, false) == MenuEditorPage.TreeAction.Rename, "");
+                Chk("⑱c Insert→AddChild",
+                    MenuEditorPage.KeyToAction(Key.Insert, ModifierKeys.None, false) == MenuEditorPage.TreeAction.AddChild, "");
+                Chk("⑱d Alt+↑→MoveUp",
+                    MenuEditorPage.KeyToAction(Key.Up, ModifierKeys.Alt, false) == MenuEditorPage.TreeAction.MoveUp, "");
+                Chk("⑱e Alt+↓→MoveDown",
+                    MenuEditorPage.KeyToAction(Key.Down, ModifierKeys.Alt, false) == MenuEditorPage.TreeAction.MoveDown, "");
+                Chk("⑱f Tab→Indent",
+                    MenuEditorPage.KeyToAction(Key.Tab, ModifierKeys.None, false) == MenuEditorPage.TreeAction.Indent, "");
+                Chk("⑱g Shift+Tab→Outdent",
+                    MenuEditorPage.KeyToAction(Key.Tab, ModifierKeys.Shift, false) == MenuEditorPage.TreeAction.Outdent, "");
+                Chk("⑱h Ctrl+Delete 不吃（让给系统）",
+                    MenuEditorPage.KeyToAction(Key.Delete, ModifierKeys.Control, false) == null, "");
+                Chk("⑱i 焦点在编辑框 ⇒ 一律 null（防「打字删条目」）",
+                    MenuEditorPage.KeyToAction(Key.Delete, ModifierKeys.None, true) == null
+                    && MenuEditorPage.KeyToAction(Key.F2, ModifierKeys.None, true) == null, "");
+
+                // ============================================================
+                // ⑲ B2：三入口同源 —— 按钮/右键/键盘都只调 DoTreeAction（T_TreeAction 即该分发）
+                // ============================================================
+                try
+                {
+                    var b2g = page.T_Group();
+                    var b2it = (b2g != null && b2g.Items.Count > 0) ? b2g.Items[0] : null;
+                    if (b2g == null || b2it == null)
+                    {
+                        Chk("⑲ 结构动作等价（需要非空分组）", false, "★未执行：当前分组为空");
+                    }
+                    else
+                    {
+                        int n0 = b2g.Items.Count;
+                        page.T_Select(b2it);
+                        page.T_TreeAction(MenuEditorPage.TreeAction.AddChild);
+                        int n1 = b2g.Items.Count;
+                        Chk("⑲ AddChild 增 1 条", n1 == n0 + 1, n0 + "→" + n1);
+
+                        page.T_TreeAction(MenuEditorPage.TreeAction.Duplicate);
+                        int n2 = b2g.Items.Count;
+                        bool sameTitle = false;
+                        foreach (var x in b2g.Items) if (x.Title == b2it.Title) sameTitle = true;
+                        Chk("⑲b Duplicate 增 1 条且标题同名", n2 == n1 + 1 && sameTitle, n1 + "→" + n2);
+
+                        // Delete 删的是"选中项 + 其整个子树"，行数减少量取决于子树大小 ⇒
+                        // 只断言方向（严格减少），不断言回到 n0（否则会把正确实现判成失败）。
+                        int beforeDel = b2g.Items.Count;
+                        page.T_TreeAction(MenuEditorPage.TreeAction.Delete);
+                        int afterDel = b2g.Items.Count;
+                        Chk("⑲c Delete 后条目数严格减少", afterDel < beforeDel,
+                            beforeDel + "→" + afterDel);
+                    }
+                }
+                catch (Exception exB2)
+                {
+                    Chk("⑲ 结构动作等价（T_TreeAction 可驱动）", false, "异常：" + exB2.Message);
+                }
+
+                // ============================================================
+                // ⑰ B4a-1（P0 数据安全）：配置读不进来时禁止保存
+                //   ① 页面级：坏配置 ⇒ _loadOk=false +「保存」禁用 + OnSave 二次防御 + 文件不变
+                //   ② 写回器级：**绕过页面**直接 Save(空集合) ⇒ 兜底硬闸拒绝 + 文件不变
+                //   ③ 首次创建：目标文件不存在 + 空集合 ⇒ 允许写（不能把正常路径也拦死）
+                // ============================================================
+                string badRoot = Path.Combine(root, "state", "b4a-broken");
+                string badConf = Path.Combine(badRoot, "config", "menus.conf");
+                Directory.CreateDirectory(Path.Combine(badRoot, "config"));
+                Directory.CreateDirectory(Path.Combine(badRoot, "cache"));
+                File.WriteAllText(badConf,
+                    "! 通用  always\n"
+                    + "  记事本  _N  | run  notepad.exe\n"
+                    + "! 坏组  nosuchtype\n"
+                    + "  随便  | run  x.exe\n", new UTF8Encoding(false));
+
+                byte[] badBefore = File.ReadAllBytes(badConf);
+                var badPage = new MenuEditorPage(badRoot);
+                Chk("⑰a 坏配置 ⇒ 页面判定「没读进来」", !badPage.T_LoadOk(), badPage.T_Status());
+                Chk("⑰b 坏配置 ⇒「保存」按钮禁用", !badPage.T_SaveEnabled(),
+                    "loadOk=" + badPage.T_LoadOk());
+                string rejectMsg = badPage.T_OnSave();
+                Chk("⑰c 坏配置 ⇒ OnSave 被拒（二次防御）", rejectMsg.Contains("已拒绝保存"), rejectMsg);
+                Chk("⑰d 坏配置 ⇒ 原文件一个字节没动（没被清空）",
+                    BytesEqual(badBefore, File.ReadAllBytes(badConf)), "字节=" + badBefore.Length);
+
+                // ② 写回器兜底硬闸 —— 直接调 Save，跳过页面的两道闸
+                var badWriter = new MenuConfWriter(badConf);
+                string gateMsg;
+                bool gateOk = badWriter.Save(new List<MenuGroup>(), out gateMsg);
+                Chk("⑰e 空集合覆盖坏文件被拒（writer 硬闸）",
+                    !gateOk && gateMsg.Contains("拒绝写入"), gateMsg);
+                Chk("⑰f 硬闸拒绝后原文件仍未被改",
+                    BytesEqual(badBefore, File.ReadAllBytes(badConf)),
+                    "字节=" + File.ReadAllBytes(badConf).Length);
+
+                // ②b 原文件是好的、但集合是空的（模拟"读失败后仍旧集合"）⇒ 同样拒绝
+                string keepConf = Path.Combine(badRoot, "config", "menus.conf.keep");
+                File.Copy(tmpConf, keepConf, true);
+                byte[] keepBefore = File.ReadAllBytes(keepConf);
+                var keepWriter = new MenuConfWriter(keepConf);
+                string gateMsg2;
+                bool gateOk2 = keepWriter.Save(new List<MenuGroup>(), out gateMsg2);
+                Chk("⑰g 空集合覆盖非空好配置被拒（writer 硬闸）",
+                    !gateOk2 && gateMsg2.Contains("拒绝写入"), gateMsg2);
+                Chk("⑰h 拒绝后好配置字节不变", BytesEqual(keepBefore, File.ReadAllBytes(keepConf)), "");
+
+                // ③ 首次创建（原文件不存在）必须放行，否则把正常路径也拦死了
+                string freshConf = Path.Combine(badRoot, "config", "menus.fresh.conf");
+                if (File.Exists(freshConf)) File.Delete(freshConf);
+                var freshWriter = new MenuConfWriter(freshConf);
+                string freshMsg;
+                bool freshOk = freshWriter.Save(new List<MenuGroup>(), out freshMsg);
+                Chk("⑰i 原文件不存在时允许写（首次创建不被拦）",
+                    freshOk && File.Exists(freshConf), freshMsg);
             }
             catch (Exception ex)
             {
@@ -333,7 +452,7 @@ namespace RunEverCs
 
             Lines.Add("");
             Lines.Add("说明：结构操作全部走 MenuEditorPage 测试缝（与产品路径同一份实现）；");
-            Lines.Add("      沙箱 = state\\ui-test-tree\\config\\menus.conf（副本），不动真实配置。");
+            Lines.Add("      沙箱 = state\\ui-test-tree\\config\\menus.conf（副本）+ state\\b4a-broken\\（故意写坏的配置），不动真实配置。");
             Lines.Add("结果: " + (_fail == 0 ? "全部通过 ✓" : _fail + " 项失败 ✗"));
 
             try { File.WriteAllText(outFile, string.Join(Environment.NewLine, Lines.ToArray()), new UTF8Encoding(false)); }

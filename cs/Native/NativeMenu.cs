@@ -110,6 +110,23 @@ namespace RunEverCs.Native
             return id;
         }
 
+        /// <summary>
+        /// 添加**禁用（灰显）**条目 —— B4a-2「菜单全空」时的占位项用（用户能看见字，但点不动）。
+        ///
+        /// ★ 只用 `MF_GRAYED`：MS 文档写明 `MF_GRAYED` 本身就"禁用 + 变灰"，
+        ///   且 `MF_DISABLED / MF_ENABLED / MF_GRAYED` 是**互斥组**，不能叠加
+        ///   （https://learn.microsoft.com/zh-cn/windows/desktop/api/winuser/nf-winuser-appendmenuw）。
+        /// 与 `AddItem` 一样返回命令 ID（进不了 idmap ⇒ 万一点到也不会误触发任何条目）。
+        /// </summary>
+        public int AddItemDisabled(string text)
+        {
+            int id = AllocId();
+            bool ok = Win32.AppendMenuW(Handle, Win32.MF_STRING | Win32.MF_GRAYED,
+                new IntPtr(id), text);
+            if (!ok) throw new InvalidOperationException("AppendMenuW(GRAYED) 失败: " + text);
+            return id;
+        }
+
         public void AddSeparator()
         {
             Win32.AppendMenuW(Handle, Win32.MF_SEPARATOR, IntPtr.Zero, null);

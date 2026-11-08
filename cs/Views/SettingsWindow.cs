@@ -14,8 +14,8 @@ namespace RunEverCs.Views
     /// 新版按微软官方《Guidelines for app settings》与 Windows 11 设置页的实际结构：
     ///   · **左侧导航列表 + 右侧内容区**（顶部 Tab 超过 4 个就开始横着挤，且无法分组）；
     ///   · 内容区单列、最大宽度 1000px、灰底白卡；
-    ///   · 每页只讲一个主题：菜单与条目 / 触发与行为 / 外观 / 路径解析 / 同步 / 插件 / 日志与诊断 / 关于；
-    ///   · 页面**懒加载**（点才建），避免一次构造 8 页拖慢开窗。
+    ///   · 每页只讲一个主题：菜单与条目 / 触发与行为（含插件） / 路径解析 / 诊断（含同步、日志、关于）；
+    ///   · 页面**懒加载**（点才建），避免一次构造多页拖慢开窗。
     /// </summary>
     public class SettingsWindow : Window
     {
@@ -71,13 +71,14 @@ namespace RunEverCs.Views
             _nav.ItemContainerStyle = BuildNavStyle();
             _nav.SelectionChanged += (s, e) => ShowSelected();
 
+            // ★ B1-6（2026-11-08）：导航 7 页 → **4 页**。
+            //   合并口径：「插件」并入「触发与行为」末尾；「同步」+「日志与诊断」+「关于」并入「诊断」。
+            //   为什么合并：7 页里有 3 页各自只有 1-2 行设置，点进去像"空房间"，
+            //   用户要找一个开关得先把 7 个标题过一遍。
             AddNav("菜单与条目", "菜单与条目");
             AddNav("触发与行为", "触发与行为");
             AddNav("路径解析", "路径解析");
-            AddNav("同步", "同步");
-            AddNav("插件", "插件");
-            AddNav("日志与诊断", "日志与诊断");
-            AddNav("关于", "关于");
+            AddNav("诊断", "诊断");
 
             // ---- 右：内容 ----
             _host = new ContentControl { HorizontalContentAlignment = HorizontalAlignment.Stretch };
@@ -108,6 +109,13 @@ namespace RunEverCs.Views
 
             Closing += (s, e) =>
             {
+                // ★ B4b-2：先把焦点从当前输入框移走，再判脏/判写盘成败。
+                //   为什么必须手动做：WPF 里"点关闭"不会先触发 TextBox.LostFocus ——
+                //   绑定/提交发生在 Closing **之后**，于是最后一段输入会丢。
+                //   StackOverflow 高票答案（MoveFocus 逼出 LostFocus，再把焦点放回去）：
+                //   https://stackoverflow.com/a/229871
+                CommitFocusedEdit();
+
                 if (_menuPage != null && _menuPage.HasUnsaved)
                 {
                     var r = MessageBox.Show(
@@ -130,6 +138,24 @@ namespace RunEverCs.Views
             };
 
             Loaded += (s, e) => { if (_nav.Items.Count > 0) _nav.SelectedIndex = 0; };
+        }
+
+        /// <summary>
+        /// 把键盘焦点从当前控件挪开再挪回来 —— 目的是**逼出 LostFocus**，
+        /// 让「改完立刻落盘」的那些输入框在关窗前把最后一次编辑提交掉。
+        /// 挪回来是为了万一用户取消关闭（还有未保存修改）时不丢光标位置。
+        /// </summary>
+        private void CommitFocusedEdit()
+        {
+            try
+            {
+                var focused = System.Windows.Input.Keyboard.FocusedElement as UIElement;
+                if (focused == null) return;
+                focused.MoveFocus(new System.Windows.Input.TraversalRequest(
+                    System.Windows.Input.FocusNavigationDirection.Next));
+                focused.Focus();
+            }
+            catch { }
         }
 
         private Style BuildNavStyle()
@@ -178,27 +204,20 @@ namespace RunEverCs.Views
                     _menuPage.AfterSave = _afterConfigSaved;
                     return _menuPage;
 
-                case "插件":
-                    return new PluginPage(_root);
-
                 case "触发与行为":
                     {
+                        // 插件管理已并进本页末尾（见 TriggerPage.Build）
                         var p = new TriggerPage(_root); Hook(p); return p;
                     }
                 case "路径解析":
                     {
                         var p = new PathResolvePage(_root); Hook(p); return p;
                     }
-                case "同步":
+                case "诊断":
                     {
-                        var p = new SyncPage(_root); Hook(p); return p;
-                    }
-                case "日志与诊断":
-                    {
+                        // 同步 / 日志 / 关于 三块已并成这一页（见 DiagnosticsPage.Build）
                         var p = new DiagnosticsPage(_root); Hook(p); return p;
                     }
-                case "关于":
-                    return new AboutPage(_root);
             }
             return null;
         }

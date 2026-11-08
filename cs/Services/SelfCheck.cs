@@ -127,6 +127,10 @@ namespace RunEverCs.Services
         public long ElapsedMs;
         public long CacheWriteBackCount;
         public string CacheWriteBackNote = "";
+
+        /// <summary>本次自检的完成时刻（B4b-9 留痕用：窗口/状态里要能说"上次检查于几点"）。</summary>
+        public DateTime FinishedAt = DateTime.Now;
+
         public readonly List<SelfCheckItem> Items = new List<SelfCheckItem>();
 
         public int Total;       // 实际检查数（run+open 且可判）
@@ -164,6 +168,140 @@ namespace RunEverCs.Services
             return "检查=" + Total + " 已安装=" + Exists + " 未找到(已确认)=" + Missing
                 + " 未找到(待确认)=" + Unknown + " 跳过=" + Skipped
                 + " 耗时=" + ElapsedMs + "ms 后端=" + (Backend != null ? Backend.KindText : "?");
+        }
+
+        /// <summary>
+        /// 「上次检查于 HH:mm，结果：可用 N / 未找到 M」（B4b-9）。
+        /// ★ 只给**时间 + 两个数**，是留痕用的最小信息；完整人话结论见 B5 的 `HumanSummary()`。
+        /// </summary>
+        public string LastCheckLine()
+        {
+            return "上次检查于 " + FinishedAt.ToString("HH:mm")
+                + "，结果：可用 " + Exists + " / 未找到 " + (Missing + Unknown);
+        }
+
+        // ============================================================
+        // B5 · 人话层（气泡 / 窗口用）
+        //
+        // 纪律：**这一层里不许出现** backend= / dbLoaded= / lastError= / 层级= /
+        //   包名已核实 / probe= 这类机器字段 —— 那些只允许出现在「明细（折叠）」与
+        //   报告文件里（`Render()` 保持原样，脚本仍可解析）。
+        // ============================================================
+
+        /// <summary>后端是否可信（EV 直连 + 探针有命中 + 索引已加载）。不可信 ⇒ 不许说"确实没有"。</summary>
+        public bool BackendTrusted()
+        {
+            return Backend != null
+                && Backend.Kind == BackendKind.Everything
+                && Backend.ProbeHits > 0
+                && Backend.DbLoaded;
+        }
+
+        /// <summary>搜索后端的一句话状态（人话，可给气泡/窗口）。</summary>
+        public string BackendHumanLine()
+        {
+            if (Backend == null) return "搜索后端：未知（这次结果不可信）";
+
+            if (Backend.Kind == BackendKind.Everything)
+            {
+                if (Backend.DbLoaded && Backend.ProbeHits > 0)
+                    return "搜索正常（Everything 直连"
+                        + (Backend.ProbeMs >= 0 ? "，" + Backend.ProbeMs + "ms" : "") + "）";
+                return "Everything 已连上，但索引还没就绪（可能在重建索引），这次结果不可信";
+            }
+            if (Backend.Kind == BackendKind.Es)
+                return "搜索降级：Everything 没连上，改用 es.exe 兜底，结果可能不全";
+            return "搜索后端不可用（Everything 没开或找不到 Everything64.dll）";
+        }
+
+        /// <summary>B5-1：一句人话结论（三选一）。</summary>
+        public string HumanConclusion()
+        {
+            if (!BackendTrusted())
+                return "搜索后端异常，这次结果不可信 —— 先点「检查搜索后端」";
+
+            int notFound = Missing + Unknown;
+            if (notFound == 0)
+                return "检查了 " + Total + " 项，全部可用，可以放心用";
+            return Total + " 项里 " + notFound + " 项没找到（已在下面列好，附安装命令）";
+        }
+
+        /// <summary>
+        /// 气泡用的短文案：结论 + 后端一句话 + 跳过说明（没有就用不到）。
+        /// ★ 给脚本/日志的仍然是 `SummaryLine()`（字段名不变，B5-7 双文案并存）。
+        /// </summary>
+        public string HumanSummary()
+        {
+            var sb = new StringBuilder();
+            sb.Append(HumanConclusion());
+            sb.Append('\n').Append(BackendHumanLine());
+            if (Skipped > 0) sb.Append('\n').Append(SkipExplanation());
+            return sb.ToString();
+        }
+
+        /// <summary>B5-5：跳过项归类成人话（不是含糊的"跳过 9 项"）。</summary>
+        public string SkipExplanation()
+        {
+            if (Skipped <= 0) return "";
+
+            int notProgram = 0, placeholder = 0, other = 0;
+            foreach (var it in Items)
+            {
+                if (it.Status != CheckStatus.Skipped) continue;
+                string n = it.Note ?? "";
+                if (n.IndexOf("占位符", StringComparison.Ordinal) >= 0) placeholder++;
+                else if (n.IndexOf("类型不参与", StringComparison.Ordinal) >= 0) notProgram++;
+                else other++;
+            }
+
+            var parts = new List<string>();
+            if (notProgram > 0) parts.Add(notProgram + " 项不是程序（网址/按键/发送文本）");
+            if (placeholder > 0) parts.Add(placeholder + " 项含运行时占位符（运行前才知道路径）");
+            if (other > 0) parts.Add(other + " 项目标为空或类型不需要判断");
+
+            return "跳过 " + Skipped + " 项：" + string.Join("、", parts.ToArray())
+                + "，都不需要检查「存在性」，不影响上面的结论";
+        }
+
+        /// <summary>
+        /// B5-2 第二段「需要你处理的」：一条 = 显示名 + 这是哪个软件/建议怎么装。
+        /// </summary>
+        public string HumanProblemLine(SelfCheckItem it, out bool isConfirmedMissing)
+        {
+            isConfirmedMissing = (it.Status == CheckStatus.Missing);
+
+            string title = FirstNonEmpty(it.Title, it.Prog, it.Target, "(未命名条目)");
+            string prog = FirstNonEmpty(it.Prog, it.Target, "");
+            string from = string.IsNullOrEmpty(it.Group) ? "" : "（来自分组「" + it.Group + "」）";
+
+            var sb = new StringBuilder();
+            sb.Append(title);
+            if (prog.Length > 0 && prog != title) sb.Append("  —  ").Append(prog);
+            sb.Append(from).Append('\n');
+
+            if (isConfirmedMissing)
+            {
+                if (it.Package.Length > 0)
+                    sb.Append("    这台机器上确实没装。可用 choco 安装：choco install ")
+                      .Append(it.Package).Append(" -y");
+                else if (it.Note != null && it.Note.IndexOf("系统自带", StringComparison.Ordinal) >= 0)
+                    sb.Append("    这是 Windows 自带程序，找不到通常说明系统文件缺失（不建议用 choco 补）");
+                else
+                    sb.Append("    这台机器上确实没装；不知道该对应哪个安装包，可先搜：choco search ")
+                      .Append(SearchTerm(it));
+            }
+            else
+            {
+                sb.Append("    查不到，但「不代表没装」（搜索后端异常 / 便携版不在索引里）");
+            }
+            return sb.ToString();
+        }
+
+        private static string FirstNonEmpty(params string[] vals)
+        {
+            foreach (var v in vals)
+                if (!string.IsNullOrEmpty(v) && v.Trim().Length > 0) return v;
+            return "";
         }
 
         /// <summary>
@@ -408,6 +546,7 @@ namespace RunEverCs.Services
 
             sw.Stop();
             rep.ElapsedMs = sw.ElapsedMilliseconds;
+            rep.FinishedAt = DateTime.Now;
             rep.Tally();
             log("自检结束：" + rep.SummaryLine());
             return rep;
