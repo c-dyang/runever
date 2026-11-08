@@ -1,0 +1,80 @@
+NOTE: 显示  key=sys:group
+sys:simpleIf :: condition=$={跳过显示} == false
+  >sys:getSysInfo
+  >sys:simpleIf :: condition=$= {actionCount} > 1
+  >  >sys:runAction :: type=StopOtherInstance ; stopIfFail=1
+  >  >sys:stop :: method=default ; isError=0
+  >sys:if :: condition=$= {文件选中判断} == true
+  >  >sys:simpleIf [添加所选文件项] :: condition=$= {选中文件数量} == 1
+  >  >  >sys:pathExtraction :: operation=getInfo ; path=<var:选中文件列表> ; stopIfFail=1
+  >  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$[fa:Light_CheckSquare:#56AD89]{text}|operation=copy&data={text}
+----
+  >  >sys:simpleIf :: condition=$= {菜单类型} == '单类'
+  >  >  >sys:listOperations :: list=<var:显示> ; type=concat ; list2=<var:文件菜单_显示>
+  >  >sys:simpleIf :: condition=$= {菜单类型} == '通用'
+  >  >  >sys:dictOperations :: type=get ; dict=<var:核心词典> ; key=通用菜单(默认分组禁止修改)^pubic ; returnEmptyIfKeyNotExist=1 ; ignoreCase=0 ; stopIfFail=0
+  >  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >  >  >sys:listOperations :: list=<var:显示> ; type=concat ; list2=<var:列表>
+  >  >sys:simpleIf :: condition=$= {菜单类型} == '文件夹'
+  >  >  >sys:dictOperations :: type=get ; dict=<var:核心词典> ; key=文件夹(默认分组禁止修改)^folder ; returnEmptyIfKeyNotExist=1 ; ignoreCase=0 ; stopIfFail=0
+  >  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >  >  >sys:listOperations :: list=<var:显示> ; type=concat ; list2=<var:列表>
+  >  E>sys:simpleIf :: condition=$= {文本选中判断} == false
+  >  E>  >sys:dictOperations :: type=get ; dict=<var:核心词典> ; key=通用菜单(默认分组禁止修改)^pubic ; returnEmptyIfKeyNotExist=1 ; ignoreCase=0 ; stopIfFail=0
+  >  E>  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >  E>  >sys:listOperations :: list=<var:显示> ; type=concat ; list2=<var:列表>
+  >sys:simpleIf :: condition=$= {文本选中判断} == true
+  >  >sys:dictOperations :: type=get ; dict=<var:核心词典> ; key=文本菜单(默认分组禁止修改)^search ; returnEmptyIfKeyNotExist=1 ; ignoreCase=0 ; stopIfFail=0
+  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >  >sys:listOperations :: list=<var:显示> ; type=concat ; list2=<var:列表>
+  >sys:simpleIf :: condition=$= {进程菜单为空} == false
+  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >  >sys:each :: input=<var:筛选列表> ; useMultiThread=0 ; stopIfFail=1
+  >  >  >sys:listOperations :: list=<var:分组列表> ; type=filterByContains ; item=<var:text>
+  >  >  >sys:dictOperations :: type=get ; dict=<var:核心词典> ; key=<var:程序名> ; returnEmptyIfKeyNotExist=0 ; ignoreCase=0 ; stopIfFail=0
+  >  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=<var:列表>
+  >sys:dictOperations [获取固定列表] :: type=get ; dict=<var:核心词典> ; key=永久显示(默认分组禁止修改)^tips ; returnEmptyIfKeyNotExist=0 ; ignoreCase=0 ; stopIfFail=0
+  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$----
+  >sys:listOperations [添加固定] :: list=<var:显示> ; type=concat ; list2=<var:列表>
+  >sys:simpleIf :: condition=$= {隐藏失效对象} == true
+  >  >sys:assign :: input=<var:显示> ; stopIfFail=1
+  >  >sys:listOperations :: list=<var:显示> ; type=clear
+  >  >sys:each :: input=<var:列表> ; useMultiThread=0 ; stopIfFail=1
+  >  >  >sys:if :: condition=$= String.Equals({text}, "----")||{text}.IndexOf("rundll32", StringComparison.OrdinalIgnoreCase) >= 0
+  >  >  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=<var:text>
+  >  >  >  E>sys:assign :: input=$= {text}.Split('|')[1] ; stopIfFail=0
+  >  >  >  E>sys:if :: condition=$= String.IsNullOrWhiteSpace({路径})
+  >  >  >  E>  >sys:listOperations :: list=<var:显示> ; type=append ; item=<var:text>
+  >  >  >  E>  E>sys:assign :: input=$= {路径}.Split('^')[0] ; stopIfFail=1
+  >  >  >  E>  E>sys:if :: condition=$= !({路径}.IndexOf("=", StringComparison.OrdinalIgnoreCase) >= 0)
+  >  >  >  E>  E>  >sys:if :: condition=$= {路径}.StartsWith("http", StringComparison.OrdinalIgnoreCase)
+  >  >  >  E>  E>  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=<var:text>
+  >  >  >  E>  E>  >  E>sys:listOperations :: list=<var:缓存列表> ; type=filterByContains ; item=<var:路径>
+  >  >  >  E>  E>  >  E>sys:simpleIf :: condition=$= {isSuccess} == false
+  >  >  >  E>  E>  >  E>  >sys:listOperations :: list=<var:显示> ; type=append ; item=<var:text>
+  >  >  >  E>  E>  E>sys:listOperations :: list=<var:显示> ; type=append ; item=<var:text>
+  >sys:listOperations [添加功能搜索按键] :: list=<var:显示> ; type=append ; item=$$----
+[url:https://img.icons8.com/?size=100&id=12773&format=png&color=000000]搜索|Search
+  >sys:listOperations [添加分组] :: list=<var:显示> ; type=append ; item=[fa:Light_LayerGroup:#1FA057]分组
+  >sys:each [添加分组显示] :: input=<var:分组列表> ; useMultiThread=0 ; stopIfFail=1
+  >  >sys:assign :: input=$= {text}.Split('^')[0] ; stopIfFail=1
+  >  >sys:assign :: input=$$	[fa:Light_LayerGroup]{标题}|分组={text} ; stopIfFail=1
+  >  >sys:listOperations [添加固定] :: list=<var:显示> ; type=append ; item=<var:text>
+  >sys:simpleIf :: condition=$= {获取已打开的浏览器标签页} == true
+  >  >sys:subprogram :: subProgram=Runever配套标签页动作 ; stopIfFail=1 ; skipDebugOutput=0
+  >  >sys:simpleIf [正在浏览的网页不为空] :: condition=$= !({list_show}.Count == 0)
+  >  >  >sys:listOperations [添加正在浏览的网页] :: list=<var:显示> ; type=append ; item=$$[fa:Brands_Chrome:#326CF3]在浏览的网页|
+{list_show}
+  >sys:simpleIf :: condition=$= !(String.IsNullOrWhiteSpace({Everything路径}))
+  >  >sys:listOperations :: list=<var:显示> ; type=append ; item=$$[url:https://helperservice.getquicker.cn/favicon/get/voidtools.com]Everything本地搜索|本地搜索
+  >sys:simpleIf [是否添加【添加按钮】] :: condition=$= {文本选中判断} == true||{文件选中判断} == true
+  >  >sys:listOperations [添加添加工具栏] :: list=<var:显示> ; type=append ; item=$$----
+[fa:Light_Plus:#1ED76D]添加|添加
+  >sys:simpleIf :: condition=$={quicker_in_param} != "Search"
+  >  >sys:showmenu :: menuData=<var:显示> ; fontsize=<var:字号> ; iconsize=<var:图标大小> ; maxHeight=0 ; useFocus=1 ; waitMenuClose=1 ; stopIfFail=0
+  >  >sys:simpleIf :: condition=$= {isSuccess} == false && {失败后是否清除剪贴板} == true && ({文件选中判断} == true || {文本选中判断} == true) == true
+  >  >  >sys:writeClipboard :: type=clear ; stopIfFail=1
+  >  >  >sys:stop :: method=default ; isError=0
+  >  >sys:simpleIf :: condition=$= {isSuccess} == false
+  >  >  >sys:stop :: method=default ; isError=0
+

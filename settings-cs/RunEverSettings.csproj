@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>RunEverCs</AssemblyName>
+    <RootNamespace>RunEverCs</RootNamespace>
+    <Deterministic>true</Deterministic>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <!-- 关掉默认的 Main 自动生成，由 App.xaml 或手写 Program.cs 提供 -->
+    <StartupObject>RunEverCs.Program</StartupObject>
+    <!-- 4.8 WPF 下不引 System.Text.Json（那是 Core 的东西），JSON 自己拼 -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+</Project>

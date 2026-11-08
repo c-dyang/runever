@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>RunEverCs</AssemblyName>
+    <RootNamespace>RunEverCs</RootNamespace>
+    <Deterministic>true</Deterministic>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+
+    <!-- ★ 排除"另一套中间目录"（obj-wb / bin-wb）：
+         本仓另有一条用 -p:BaseIntermediateOutputPath=obj-wb\ 的构建路径
+         （cs\build-wb.rsp + cs-build-wb\RunEverCs.Wb.csproj）。
+         一旦那条路径跑过，SDK 的默认 glob **\*.cs 会把 obj-wb\Release\*.cs
+         （生成的 AssemblyInfo / TargetFrameworkAttribute）也编译进来，
+         于是默认构建报 CS0579「特性重复」8 个错误 —— 与代码无关，是目录污染。
+         这里显式排除，两条构建路径互不干扰、都可单独跑通。 -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);obj-wb\**;bin-wb\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="obj-wb\**" />
+    <Compile Remove="bin-wb\**" />
+  </ItemGroup>
+
+  <!-- 2026-11-07：解除「零第三方依赖」口径（用户拍板：UI 改由库托管渲染，禁手写）。
+       MahApps.Metro 2.x 只提供**隐式样式**（ContextMenu / MenuItem 的 Role 化模板），
+       不接管行为 —— 焦点 / 键盘 / Esc / 点外关闭仍走 WPF 原生 ContextMenu，
+       避免自绘 Popup 再出「输入不了」这类 bug。 -->
+  <ItemGroup>
+    <PackageReference Include="MahApps.Metro" Version="2.4.11" />
+  </ItemGroup>
+
+  <!-- 2026-11-07：原生采集（captureBackend=native）要读 UI Automation TextPattern。
+       UIAutomationClient / UIAutomationTypes 是 .NET Framework **自带程序集**（GAC），
+       不是第三方 NuGet 依赖。 -->
+  <ItemGroup>
+    <Reference Include="UIAutomationClient" />
+    <Reference Include="UIAutomationTypes" />
+    <Reference Include="WindowsBase" />
+  </ItemGroup>
+
+</Project>

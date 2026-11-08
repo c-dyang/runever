@@ -1,0 +1,972 @@
+===== MAIN STEPS =====
+[sys:simpleIf] 首次运行 :: 
+  >[sys:subprogram]  :: 
+[sys:group] 运行初始化 :: 
+  >[sys:getSysInfo]  :: 
+  >[sys:dictOperations]  :: 
+  >[sys:each]  :: 
+  >  >[sys:assign]  :: 
+  >  >[sys:listOperations]  :: 
+[sys:group] 设置 :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:form]  :: 
+  >  >[sys:repeat]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:each]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:getSelectedFiles]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:form]  :: 
+  >  >  >  >  E>[sys:form]  :: 
+  >  >  >  >[sys:strCompare] 路径是否为网址 :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:csscript]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  E>[sys:if]  :: 
+  >  >  >  >  E>  >[sys:assign]  :: 
+  >  >  >  >  E>  E>[sys:everythingsearch]  :: 
+  >  >  >  >  E>  E>[sys:if]  :: 
+  >  >  >  >  E>  E>  >[sys:listOperations]  :: 
+  >  >  >  >  E>  E>  >[sys:subprogram]  :: 
+  >  >  >  >  E>  E>  >[sys:checkPathExists]  :: 
+  >  >  >  >  E>  E>  >[sys:if] 非lnk路径 :: 
+  >  >  >  >  E>  E>  >  >[sys:pathExtraction]  :: 
+  >  >  >  >  E>  E>  >  >[sys:simpleIf]  :: 
+  >  >  >  >  E>  E>  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >  E>  E>  >  >  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  >  >  E>  E>  >  >  >[sys:listOperations] 缓存列表去重 :: 
+  >  >  >  >  E>  E>  >  E>[sys:pathExtraction]  :: 
+  >  >  >  >  E>  E>  >  E>[sys:assign]  :: 
+  >  >  >  >  E>  E>  >  E>[sys:simpleIf]  :: 
+  >  >  >  >  E>  E>  >  E>  >[sys:pathExtraction]  :: 
+  >  >  >  >  E>  E>  >  E>  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  >  >  E>  E>  >  E>  >[sys:listOperations] 缓存列表去重 :: 
+  >  >  >  >  E>  E>  >[sys:stringProcess] 根据【标题】提取首字符，得到【快捷键】 :: 
+  >  >  >  >  E>  E>  >[sys:regexExtract]  :: 
+  >  >  >  >  E>  E>  >[sys:simpleIf]  :: 
+  >  >  >  >  E>  E>  >  >[sys:subprogram]  :: 
+  >  >  >  >  E>  E>  >[sys:stringProcess] 将【快捷键】大写化 :: 
+  >  >  >  >  E>  E>  >[sys:if]  :: 
+  >  >  >  >  E>  E>  >  >[sys:assign]  :: 
+  >  >  >  >  E>  E>  >  E>[sys:assign]  :: 
+  >  >  >  >  E>  E>  E>[sys:notify]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:quickeroperations]  :: 
+  >  >  >  >[sys:stringProcess] 根据【标题】提取首字符，得到【快捷键】 :: 
+  >  >  >  >[sys:regexExtract]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:subprogram]  :: 
+  >  >  >  >[sys:stringProcess] 将【快捷键】大写化 :: 
+  >  >  >  >[sys:regexExtract] 图标是否为网址 :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  E>[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf] 添加动作参数 :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:form]  :: 
+  >  >  >  >  >[sys:assign] 拼接搜索引擎条目 :: 
+  >  >  >  >  E>[sys:regexExtract] 提取图标 :: 
+  >  >  >  >  E>[sys:assign] 拼接搜索引擎条目 :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:stringProcess]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:each]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:MsgBox]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:manageList]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:showText]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:manageList]  :: 
+  >  >  >  >  E>[sys:listOperations]  :: 
+  >  >  >  >  E>[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  E>[sys:subprogram]  :: 
+  >  >  >  E>[sys:subprogram]  :: 
+  >  >  >  E>[sys:assign]  :: 
+  >  >  >[sys:form]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:break]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:subprogram]  :: 
+  >  >[sys:continue]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:form]  :: 
+  >  >[sys:continue]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:getSysInfo]  :: 
+  >  >[sys:clouddata]  :: 
+  >  >[sys:notify]  :: 
+  >  >[sys:continue]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:getSysInfo]  :: 
+  >  >[sys:clouddata]  :: 
+  >  >[sys:notify]  :: 
+  >  >[sys:continue]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:dictOperations]  :: 
+  >  >[sys:splitString]  :: 
+  >  >[sys:showText]  :: 
+  >  >[sys:form]  :: 
+  >  >[sys:stop]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:stateStorage]  :: 
+  >  >[sys:custompanel]  :: 
+  >  >[sys:stop]  :: 
+  >[sys:simpleIf] 自动上传 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:getSysInfo]  :: 
+  >  >  >  >[sys:clouddata]  :: 
+  >  >  >  >[sys:notify]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >  E>[sys:stop]  :: 
+[sys:group] 独立功能 :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:runAction]  :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:notify]  :: 
+  >  >  >[sys:runAction]  :: 
+  >  >  E>[sys:getExplorerPath]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:assign]  :: 
+  >  >  E>[sys:if]  :: 
+  >  >  E>  >[sys:run]  :: 
+  >  >  E>  E>[sys:getSelectedText]  :: 
+  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  E>  E>  >[sys:userInput]  :: 
+  >  >  E>  E>[sys:run]  :: 
+  >  >[sys:stop]  :: 
+[sys:group] 获取信息 :: 
+  >[sys:group]  :: 
+  >  >[sys:getActiveProcessInfo]  :: 
+  >  >[sys:getSelectedText]  :: 
+  >  >[sys:getSelectedFiles]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:getClipboardText]  :: 
+  >  >[sys:getClipboardFiles]  :: 
+  >[sys:keyoperation]  :: 
+  >[sys:simpleIf] ctrl添加 :: 
+  >  >[sys:getSelectedFiles]  :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:form]  :: 
+  >  >  E>[sys:form]  :: 
+  >  >[sys:strCompare] 路径是否为网址 :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:regexExtract] 提取图标 :: 
+  >  >  >[sys:assign]  :: 
+  >  >  E>[sys:subprogram]  :: 
+  >  >[sys:checkPathExists]  :: 
+  >  >[sys:if] 非lnk路径 :: 
+  >  >  >[sys:pathExtraction]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  >  >[sys:listOperations] 缓存列表去重 :: 
+  >  >  E>[sys:pathExtraction]  :: 
+  >  >  E>[sys:assign]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:pathExtraction]  :: 
+  >  >  E>  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  E>  >[sys:listOperations] 缓存列表去重 :: 
+  >  >[sys:stringProcess] 根据【标题】提取首字符，得到【快捷键】 :: 
+  >  >[sys:regexExtract]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:subprogram]  :: 
+  >  >[sys:stringProcess] 将【快捷键】大写化 :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  E>[sys:assign]  :: 
+  >  >[sys:subprogram]  :: 
+  >  >[sys:subprogram]  :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:getSysInfo]  :: 
+  >  >  >[sys:clouddata]  :: 
+  >  >  >[sys:notify]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >  E>[sys:stop]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:writeClipboard]  :: 
+[sys:group] 取值 :: 
+  >[sys:comment]  :: 
+  >[sys:listOperations]  :: 
+  >[sys:each]  :: 
+  >  >[sys:assign]  :: 
+  >  >[sys:listOperations]  :: 
+  >[sys:comment]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:group] 文本取值【多线程】 :: 
+  >  >  >[sys:simpleIf] 判断传入搜索参数 :: 
+  >  >  >  >[sys:stringProcess]  :: 
+  >  >  >  >[sys:splitString] 拆分为列表 :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:each]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:simpleIf] 匹配ms-settings开头的系统设置或shell开头的运行 :: 
+  >  >  >  >[sys:run]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:simpleIf] 快递单号获取 :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:regexExtract] 匹配ipv4 ipv6 :: 
+  >  >  >[sys:simpleIf] 获取到IPv4 ipv6 :: 
+  >  >  >  >[sys:if] 获取ipv4 :: 
+  >  >  >  >  >[sys:runScript]  :: 
+  >  >  >  >  E>[sys:runScript]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:simpleIf] 获取到网址 :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:regexExtract] 匹配本地路径 :: 
+  >  >  >[sys:regexExtract]  :: 
+  >  >  >[sys:simpleIf] 获取到本地地址 :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >[sys:run]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:regexExtract] 匹配邮箱 :: 
+  >  >  >[sys:simpleIf] 获取到邮箱地址 :: 
+  >  >  >  >[sys:run]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:strCompare] 筛选注册表项 :: 
+  >  >  >[sys:simpleIf] 匹配到注册表项 :: 
+  >  >  >  >[sys:checkProcessExists]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:run]  :: 
+  >  >  >  >[sys:activateProcessMainWindow]  :: 
+  >  >  >  >[sys:flauiautomation]  :: 
+  >  >  >  >[sys:keyInput]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:strCompare] 筛选base64文件头 :: 
+  >  >  >[sys:simpleIf] base64自动打开 :: 
+  >  >  >  >[sys:webview2]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:regexExtract]  :: 
+  >  >  >[sys:simpleIf] choco 自动执行 :: 
+  >  >  >  >[sys:notify]  :: 
+  >  >  >  >[sys:runScript]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf] 计算式判断 :: 
+  >  >  >[sys:strReplace] 清除=和中文标点 :: 
+  >  >  >[sys:splitString]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:compute]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >  E>[sys:assign]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:outputText]  :: 
+  >  >  >[sys:stop]  :: 
+  >[sys:comment]  :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:listOperations]  :: 
+  >  >[sys:each]  :: 
+  >  >  >[sys:checkPathExists]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf] 文件菜单为1 :: 
+  >  >  >  >  >[sys:listOperations] 读取独立条目 :: 
+  >  >  >  >  >[sys:assign] 分离菜单数据项 :: 
+  >  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:assign]  :: 
+[sys:group] 显示 :: 
+  >[sys:simpleIf]  :: 
+  >  >[sys:getSysInfo]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:runAction]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:simpleIf] 添加所选文件项 :: 
+  >  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:dictOperations]  :: 
+  >  >  E>  >[sys:listOperations]  :: 
+  >  >  E>  >[sys:listOperations]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:dictOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:dictOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >[sys:dictOperations] 获取固定列表 :: 
+  >  >[sys:listOperations]  :: 
+  >  >[sys:listOperations] 添加固定 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >  E>[sys:assign]  :: 
+  >  >  >  >  E>[sys:if]  :: 
+  >  >  >  >  E>  >[sys:listOperations]  :: 
+  >  >  >  >  E>  E>[sys:assign]  :: 
+  >  >  >  >  E>  E>[sys:if]  :: 
+  >  >  >  >  E>  E>  >[sys:if]  :: 
+  >  >  >  >  E>  E>  >  >[sys:listOperations]  :: 
+  >  >  >  >  E>  E>  >  E>[sys:listOperations]  :: 
+  >  >  >  >  E>  E>  >  E>[sys:simpleIf]  :: 
+  >  >  >  >  E>  E>  >  E>  >[sys:listOperations]  :: 
+  >  >  >  >  E>  E>  E>[sys:listOperations]  :: 
+  >  >[sys:listOperations] 添加功能搜索按键 :: 
+  >  >[sys:listOperations] 添加分组 :: 
+  >  >[sys:each] 添加分组显示 :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:listOperations] 添加固定 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:subprogram]  :: 
+  >  >  >[sys:simpleIf] 正在浏览的网页不为空 :: 
+  >  >  >  >[sys:listOperations] 添加正在浏览的网页 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >[sys:simpleIf] 是否添加【添加按钮】 :: 
+  >  >  >[sys:listOperations] 添加添加工具栏 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:showmenu]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:writeClipboard]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:stop]  :: 
+[sys:group] 执行 :: 
+  >[sys:simpleIf] 搜索启动 :: 
+  >  >[sys:listOperations]  :: 
+  >  >[sys:dictOperations]  :: 
+  >  >[sys:each]  :: 
+  >  >  >[sys:dictOperations]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:each]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >[sys:subprogram]  :: 
+  >  >[sys:dictOperations]  :: 
+  >  >[sys:each]  :: 
+  >  >  >[sys:getWindowTitle]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >[sys:listOperations]  :: 
+  >  >[sys:repeat]  :: 
+  >  >  >[sys:select]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:break]  :: 
+  >  >  >[sys:repeat]  :: 
+  >  >  >  >[sys:select] 筛选结果 :: 
+  >  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >  >[sys:break]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:break]  :: 
+  >[sys:simpleIf] 分组显示切换 :: 
+  >  >[sys:strReplace] 提取分组依据 :: 
+  >  >[sys:dictOperations]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:assign]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >  E>[sys:assign]  :: 
+  >  >  >  >  E>[sys:assign]  :: 
+  >  >  >  >  E>[sys:if]  :: 
+  >  >  >  >  E>  >[sys:listOperations]  :: 
+  >  >  >  >  E>  >[sys:simpleIf]  :: 
+  >  >  >  >  E>  >  >[sys:listOperations]  :: 
+  >  >  >  >  E>  E>[sys:listOperations]  :: 
+  >  >[sys:showmenu]  :: 
+  >[sys:group] 功能判断【多线程】 :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:if] 文本添加、文件添加判断 :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:form]  :: 
+  >  >  >  >[sys:stringProcess]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:subprogram]  :: 
+  >  >  >  E>[sys:each]  :: 
+  >  >  >  E>  >[sys:subprogram]  :: 
+  >  >  >  E>  >[sys:checkPathExists]  :: 
+  >  >  >  E>  >[sys:if] 非lnk路径 :: 
+  >  >  >  E>  >  >[sys:pathExtraction]  :: 
+  >  >  >  E>  >  >[sys:simpleIf]  :: 
+  >  >  >  E>  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  E>  >  >  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  >  E>  >  >  >[sys:listOperations] 缓存列表去重 :: 
+  >  >  >  E>  >  E>[sys:pathExtraction]  :: 
+  >  >  >  E>  >  E>[sys:simpleIf]  :: 
+  >  >  >  E>  >  E>  >[sys:pathExtraction]  :: 
+  >  >  >  E>  >  E>  >[sys:listOperations] 将路径变量添加至缓存列表 :: 
+  >  >  >  E>  >  E>  >[sys:listOperations] 缓存列表去重 :: 
+  >  >  >  E>  >[sys:form]  :: 
+  >  >  >  E>  >[sys:stringProcess] 根据【标题】提取首字符，得到【快捷键】 :: 
+  >  >  >  E>  >[sys:regexExtract]  :: 
+  >  >  >  E>  >[sys:simpleIf]  :: 
+  >  >  >  E>  >  >[sys:subprogram]  :: 
+  >  >  >  E>  >[sys:stringProcess] 将【快捷键】大写化 :: 
+  >  >  >  E>  >[sys:assign]  :: 
+  >  >  >  E>  >[sys:subprogram]  :: 
+  >  >  >  E>[sys:subprogram]  :: 
+  >  >  >[sys:simpleIf] 自动上传 :: 
+  >  >  >  >[sys:getSysInfo]  :: 
+  >  >  >  >[sys:clouddata]  :: 
+  >  >  >  >[sys:notify]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >  E>[sys:simpleIf]  :: 
+  >  >  >  E>  >[sys:listOperations]  :: 
+  >  >  >  E>  >[sys:pathExtraction]  :: 
+  >  >  >  E>[sys:run]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf] 匹配ms-settings开头的系统设置或shell开头的运行 :: 
+  >  >  >[sys:run]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:strReplace] 提取动作名/动作id :: 
+  >  >  >[sys:strCompare]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:runAction]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:runAction]  :: 
+  >  >  >  >  E>[sys:runAction]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:strReplace] 发送文本 :: 
+  >  >  >[sys:stringProcess]  :: 
+  >  >  >[sys:outputText]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:strReplace] 提取快捷键 :: 
+  >  >  >[sys:sendKeys]  :: 
+  >  >  >[sys:notify]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:stringProcess]  :: 
+  >  >  >  >[sys:strReplace]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:subprogram]  :: 
+  >  >  >  E>[sys:chromecontrol]  :: 
+  >  >  >  E>[sys:if]  :: 
+  >  >  >  E>  >[sys:chromecontrol]  :: 
+  >  >  >  E>  >[sys:chromecontrol]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:simpleIf]  :: 
+  >  >  >  E>  E>  >[sys:openUrl]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:activateProcessMainWindow]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:strReplace]  :: 
+  >  >  >[sys:windowOperations]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:strReplace]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:chromecontrol]  :: 
+  >  >  >  E>[sys:chromecontrol]  :: 
+  >  >  >  E>[sys:chromecontrol]  :: 
+  >  >  >[sys:stop]  :: 
+  >[sys:group] 文件启动工具 :: 
+  >  >[sys:assign]  :: 
+  >  >[sys:assign]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:notify]  :: 
+  >  >  >[sys:stop]  :: 
+  >  >[sys:listOperations]  :: 
+  >  >[sys:if]  :: 
+  >  >  >[sys:everythingsearch]  :: 
+  >  >  >[sys:simpleIf] 搜索结果为0，是否联网下载 :: 
+  >  >  >  >[sys:showmenu]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >  >[sys:openUrl]  :: 
+  >  >  >  >  E>[sys:notify]  :: 
+  >  >  >  >[sys:stop]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >[sys:run]  :: 
+  >  >  >  >  E>[sys:run]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:each]  :: 
+  >  >  >  >  >[sys:if]  :: 
+  >  >  >  >  >  >[sys:strReplace]  :: 
+  >  >  >  >  >  >[sys:run]  :: 
+  >  >  >  >  >  E>[sys:run]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:run]  :: 
+  >  >  >[sys:if]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >  E>[sys:showmenu]  :: 
+  >  >  >  E>[sys:if]  :: 
+  >  >  >  E>  >[sys:pathExtraction]  :: 
+  >  >  >  E>  >[sys:openUrl]  :: 
+  >  >  >  E>  E>[sys:notify]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:if]  :: 
+  >  >  E>  >  >[sys:strReplace]  :: 
+  >  >  E>  >  >[sys:run]  :: 
+  >  >  E>  >  E>[sys:run]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:each]  :: 
+  >  >  E>  >  >[sys:if]  :: 
+  >  >  E>  >  >  >[sys:strReplace]  :: 
+  >  >  E>  >  >  >[sys:run]  :: 
+  >  >  E>  >  >  E>[sys:run]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:run]  :: 
+  >  >  E>[sys:simpleIf]  :: 
+  >  >  E>  >[sys:everythingsearch]  :: 
+  >  >  E>  >[sys:listOperations]  :: 
+  >  >  E>  >[sys:simpleIf]  :: 
+  >  >  E>  >  >[sys:if]  :: 
+  >  >  E>  >  >  >[sys:strReplace]  :: 
+  >  >  E>  >  >  >[sys:run]  :: 
+  >  >  E>  >  >  E>[sys:run]  :: 
+  >  >  E>  >[sys:simpleIf]  :: 
+  >  >  E>  >  >[sys:each]  :: 
+  >  >  E>  >  >  >[sys:if]  :: 
+  >  >  E>  >  >  >  >[sys:strReplace]  :: 
+  >  >  E>  >  >  >  >[sys:run]  :: 
+  >  >  E>  >  >  >  E>[sys:run]  :: 
+  >  >  E>  >[sys:simpleIf]  :: 
+  >  >  E>  >  >[sys:run]  :: 
+  >  >  E>  >[sys:if]  :: 
+  >  >  E>  >  >[sys:listOperations]  :: 
+  >  >  E>  >  >[sys:listOperations]  :: 
+  >  >  E>  >  E>[sys:showmenu]  :: 
+  >  >  E>  >  E>[sys:if]  :: 
+  >  >  E>  >  E>  >[sys:pathExtraction]  :: 
+  >  >  E>  >  E>  >[sys:openUrl]  :: 
+  >  >  E>  >  E>  E>[sys:notify]  :: 
+  >  >  E>  >  E>  E>[sys:listOperations]  :: 
+  >  >[sys:simpleIf]  :: 
+  >  >  >[sys:stateStorage]  :: 
+  >  >  >[sys:each]  :: 
+  >  >  >  >[sys:pathExtraction]  :: 
+  >  >  >  >[sys:assign]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:listOperations]  :: 
+  >  >  >[sys:stateStorage]  :: 
+  >  >  >[sys:custompanel]  :: 
+  >  >  >[sys:simpleIf]  :: 
+  >  >  >  >[sys:custompanel]  :: 
+
+===== SUBPROGRAM: 添加项目  (param=) =====
+  [sys:listOperations]  :: 
+  [sys:dictOperations]  :: 
+  [sys:if]  :: 
+    >[sys:listOperations]  :: 
+    E>[sys:select]  :: 
+    E>[sys:subprogram]  :: 
+    E>[sys:simpleIf]  :: 
+    E>  >[sys:showmenu]  :: 
+    E>  >[sys:simpleIf]  :: 
+    E>  >  >[sys:repeat]  :: 
+    E>  >  >  >[sys:stringProcess]  :: 
+    E>  >[sys:simpleIf]  :: 
+    E>  >  >[sys:repeat]  :: 
+    E>  >  >  >[sys:stringProcess]  :: 
+    E>  >[sys:simpleIf]  :: 
+    E>  >  >[sys:repeat]  :: 
+    E>  >  >  >[sys:stringProcess]  :: 
+    E>[sys:listOperations]  :: 
+  [sys:dictOperations]  :: 
+  [sys:notify]  :: 
+
+===== SUBPROGRAM: 文本处理工具API调用  (param=) =====
+  [sys:http]  :: 
+
+===== SUBPROGRAM: 统计tab出现的次数  (param=) =====
+  [sys:assign]  :: 
+
+===== SUBPROGRAM: 刷新缓存  (param=) =====
+  [sys:pathExtraction]  :: 
+  [sys:simpleIf]  :: 
+    >[sys:subprogram]  :: 
+    >[sys:simpleIf]  :: 
+    >  >[sys:run]  :: 
+    >  >[sys:simpleIf]  :: 
+    >  >  >[sys:notify]  :: 
+    >  >[sys:stop]  :: 
+  [sys:simpleIf]  :: 
+    >[sys:stop]  :: 
+  [sys:listOperations]  :: 
+  [sys:each]  :: 
+    >[sys:dictOperations]  :: 
+    >[sys:each]  :: 
+    >  >[sys:assign]  :: 
+    >  >[sys:assign]  :: 
+    >  >[sys:simpleIf]  :: 
+    >  >  >[sys:everythingsearch]  :: 
+    >  >  >[sys:simpleIf]  :: 
+    >  >  >  >[sys:listOperations]  :: 
+    >  >  >  >[sys:listOperations]  :: 
+  [sys:listOperations]  :: 
+  [sys:notify]  :: 
+
+===== SUBPROGRAM: Runever配套标签页动作  (param=) =====
+  [sys:chromecontrol]  :: 
+  [sys:simpleIf]  :: 
+    >[sys:each]  :: 
+    >  >[sys:chromecontrol]  :: 
+    >  >[sys:chromecontrol]  :: 
+    >  >[sys:simpleIf]  :: 
+    >  >  >[sys:break]  :: 
+  [sys:if]  :: 
+    >[sys:subprogram]  :: 
+    >[sys:each]  :: 
+    >  >[sys:chromecontrol]  :: 
+    >  >[sys:strReplace]  :: 
+    >  >[sys:listOperations]  :: 
+    >  >[sys:if]  :: 
+    >  >  >[sys:assign]  :: 
+    >  >  E>[sys:assign]  :: 
+    >  >[sys:listOperations]  :: 
+    E>[sys:chromecontrol]  :: 
+    E>[sys:chromecontrol]  :: 
+    E>[sys:simpleIf]  :: 
+    E>  >[sys:continue]  :: 
+    E>[sys:jsonExtract]  :: 
+    E>[sys:strReplace]  :: 
+    E>[sys:each]  :: 
+    E>  >[sys:assign]  :: 
+    E>  >[sys:listOperations]  :: 
+    E>[sys:subprogram]  :: 
+    E>[sys:subprogram]  :: 
+    E>[sys:each]  :: 
+    E>  >[sys:assign]  :: 
+    E>  >[sys:listOperations]  :: 
+
+===== SUBPROGRAM: 读取浏览器所有（或已选定）标签页（title，id，url）  (param=) =====
+  [sys:chromecontrol]  :: 
+  [sys:simpleIf]  :: 
+    >[sys:group]  :: 
+    >  >[sys:jsonExtract]  :: 
+    >  >[sys:each]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >[sys:each]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >[sys:each]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >[sys:each]  :: 
+    >  >  >[sys:simpleIf]  :: 
+    >  >  >  >[sys:listOperations]  :: 
+    >  >[sys:each]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >  >[sys:dictOperations]  :: 
+    >  >  >[sys:listOperations]  :: 
+    >  >  >[sys:listOperations]  :: 
+    >  >  >[sys:listOperations]  :: 
+  [sys:chromecontrol]  :: 
+  [sys:jsonExtract]  :: 
+
+===== SUBPROGRAM: 获取所有经过净化的顶层窗口  (param=) =====
+  [sys:getWindowTitle]  :: 
+  [sys:dictOperations]  :: 
+  [sys:each]  :: 
+    >[sys:getWindowTitle]  :: 
+    >[sys:each]  :: 
+    >  >[sys:simpleIf]  :: 
+    >  >  >[sys:listOperations]  :: 
+    >  >  >[sys:continue]  :: 
+    >[sys:simpleIf]  :: 
+    >  >[sys:listOperations]  :: 
+    >  >[sys:continue]  :: 
+    >[sys:if]  :: 
+    >  >[sys:listOperations]  :: 
+    >  >[sys:listOperations]  :: 
+    >  E>[sys:simpleIf]  :: 
+    >  E>  >[sys:dictOperations]  :: 
+    >  E>  >[sys:listOperations]  :: 
+    >[sys:dictOperations]  :: 
+  [sys:each]  :: 
+    >[sys:listOperations]  :: 
+  [sys:each]  :: 
+    >[sys:dictOperations]  :: 
+    >[sys:each]  :: 
+    >  >[sys:simpleIf]  :: 
+    >  >  >[sys:listOperations]  :: 
+  [sys:each]  :: 
+    >[sys:dictOperations]  :: 
+    >[sys:dictOperations]  :: 
+
+===== SUBPROGRAM: 网址获取_Url  (param=) =====
+  [sys:chromecontrol]  :: 
+  [sys:chromecontrol]  :: 
+
+===== SUBPROGRAM: 网址获取_标题  (param=) =====
+  [sys:chromecontrol]  :: 
+  [sys:chromecontrol]  :: 
+
+===== SUBPROGRAM: 进程是否运行  (param=) =====
+  [sys:csscript]  :: 
+
+===== SUBPROGRAM: 清空历史  (param=) =====
+  [sys:stateStorage]  :: 
+  [sys:custompanel]  :: 
+
+===== VARIABLES =====
+核心词典 | Type=10 | Group=核心 | Save=True | Def= | Desc=
+不提取文件名 | Type=2 | Group= | Save=True | Def= | Desc=
+隐藏失效对象 | Type=2 | Group=初始化 | Save=True | Def= | Desc=
+Everything路径 | Type=0 | Group=基础 | Save=True | Def= | Desc=
+动作是否以进程为参数 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+等待时间 | Type=12 | Group=基础 | Save=True | Def=100 | Desc=
+自动上传 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+图标大小 | Type=1 | Group=显示配置 | Save=True | Def=16 | Desc=
+字号 | Type=1 | Group=显示配置 | Save=True | Def=12 | Desc=
+窗口黑名单 | Type=4 | Group=基础 | Save=True | Def= | Desc=
+保持剪贴板 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+结果为1自动运行 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+获取已打开的浏览器标签页 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+缓存列表 | Type=4 | Group=核心列表 | Save=True | Def= | Desc=
+获取剪贴板信息 | Type=2 | Group=基础 | Save=True | Def= | Desc=
+失败后是否清除剪贴板 | Type=2 | Group= | Save=True | Def= | Desc=
+浏览器设置 | Type=0 | Group= | Save=True | Def=默认浏览器 | Desc=
+自定义浏览器 | Type=0 | Group= | Save=True | Def= | Desc=
+历史记录 | Type=4 | Group=显示 | Save=True | Def= | Desc=
+历史记录最大数量 | Type=12 | Group=初始化 | Save=True | Def=10 | Desc=
+actionId | Type=0 | Group= | Save=False | Def= | Desc=
+everything结果列表 | Type=4 | Group= | Save=False | Def= | Desc=
+text | Type=0 | Group= | Save=False | Def= | Desc=默认的文本变量
+分组名称 | Type=0 | Group= | Save=False | Def= | Desc=
+动作包含参数 | Type=2 | Group= | Save=False | Def= | Desc=
+总长 | Type=12 | Group= | Save=False | Def= | Desc=
+扩展名列表 | Type=4 | Group= | Save=False | Def= | Desc=
+搜索引擎列表 | Type=4 | Group= | Save=False | Def= | Desc=
+用户名 | Type=0 | Group= | Save=False | Def= | Desc=
+菜单 | Type=0 | Group= | Save=False | Def= | Desc=
+分组列表 | Type=4 | Group=初始化 | Save=False | Def= | Desc=
+isFile | Type=2 | Group=判断 | Save=False | Def= | Desc=
+isFolder | Type=2 | Group=判断 | Save=False | Def= | Desc=
+isSuccess | Type=2 | Group=判断 | Save=False | Def= | Desc=
+快捷键英文 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+文件选中判断 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+文本选中判断 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+替换用户名 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+运行结果 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+进程菜单为空 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+actionCount | Type=12 | Group=动作 | Save=False | Def= | Desc=
+分组_显示 | Type=4 | Group=显示 | Save=False | Def= | Desc=
+显示 | Type=4 | Group=显示 | Save=False | Def= | Desc=
+lnk路径 | Type=0 | Group=流程 | Save=False | Def= | Desc=
+userName | Type=0 | Group=流程 | Save=False | Def= | Desc=
+修改记录 | Type=0 | Group=流程 | Save=False | Def= | Desc=
+列表 | Type=4 | Group=流程 | Save=False | Def= | Desc=
+快捷键 | Type=0 | Group=流程 | Save=False | Def= | Desc=
+文件列表 | Type=4 | Group=流程 | Save=False | Def= | Desc=
+文件夹列表 | Type=4 | Group=流程 | Save=False | Def= | Desc=
+菜单类别 | Type=4 | Group=流程 | Save=False | Def= | Desc=
+选中文件数量 | Type=12 | Group=流程 | Save=False | Def= | Desc=
+文件菜单_显示 | Type=4 | Group=结果 | Save=False | Def= | Desc=
+菜单类型 | Type=0 | Group=结果 | Save=False | Def= | Desc=
+进程名 | Type=0 | Group=获取结果 | Save=False | Def= | Desc=
+选中文件列表 | Type=4 | Group=获取结果 | Save=False | Def= | Desc=
+选中文本内容 | Type=0 | Group=获取结果 | Save=False | Def= | Desc=
+分组 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+命令行 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+图标 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+标题 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+程序名 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+路径 | Type=0 | Group=部件 | Save=False | Def= | Desc=
+设置记录 | Type=0 | Group= | Save=False | Def= | Desc=
+进程列表 | Type=4 | Group= | Save=False | Def= | Desc=
+mainWinHandle | Type=12 | Group= | Save=False | Def= | Desc=
+list_show | Type=4 | Group= | Save=False | Def= | Desc=
+browser | Type=0 | Group= | Save=False | Def= | Desc=
+isDown_Ctrl | Type=2 | Group= | Save=False | Def= | Desc=
+参数 | Type=0 | Group= | Save=False | Def= | Desc=
+筛选列表 | Type=4 | Group=流程 | Save=False | Def= | Desc=
+重复 | Type=2 | Group= | Save=False | Def= | Desc=
+Key_list | Type=4 | Group= | Save=False | Def= | Desc=
+窗口菜单 | Type=10 | Group= | Save=False | Def= | Desc=
+句柄 | Type=12 | Group= | Save=False | Def= | Desc=
+筛选分组 | Type=4 | Group=显示 | Save=False | Def= | Desc=
+跳过显示 | Type=2 | Group=判断 | Save=False | Def= | Desc=
+manifestVersion | Type=12 | Group= | Save=False | Def= | Desc=
+链接的浏览器 | Type=0 | Group= | Save=False | Def= | Desc=
+length | Type=12 | Group= | Save=False | Def= | Desc=
+

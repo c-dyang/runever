@@ -1,0 +1,50 @@
+# ---- 构建产物 ----
+cs/bin/
+cs/obj/
+build/
+release/
+*.pdb
+*.cache
+
+# ---- 本机运行态 ----
+state/
+cache/
+
+# ---- 预编译二进制（运行时依赖，按需随发布包分发，不入库）----
+dist/
+
+# ---- 备份文件（大量 .bak-* 历史副本）----
+*.bak-*
+*.bak.*
+
+# ---- 本机配置：含 WebDAV 凭据与本机路径 ----
+config/auto.conf
+config/functions/
+
+# ---- 打包产物 ----
+*.zip
+
+# ---- 编辑器 / 系统 ----
+.vs/
+.idea/
+Thumbs.db
+desktop.ini
+
+# ---- 开发现场（任务卡/门禁报告/进度/交付单，不进公开仓库）----
+_dev-notes/
+progress*.md
+gate-report*.md
+task-goal*.md
+task-table*.md
+delivery-*.md
+final-review*.md
+diff-assertions.ps1
+repeat-hotreload.ps1
+
+# ---- 二级工程构建产物 ----
+settings-cs/obj/
+settings-cs/bin/
+
+# ---- 本机真实菜单定义（含个人条目/路径）；公开仓库只放 example ----
+config/menus.conf
+config/menus.quicker*.conf
