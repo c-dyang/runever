@@ -135,7 +135,7 @@ namespace RunEverCs
                 //   起进程是惰性的（第一次 WaitCapture 才起），启动不额外付进程创建时间。
                 _captureResident = new ResidentCaptureClient(_capture.RunnerPath, _capture.AhkExe);
                 // 图标落盘缓存（2026-11-07）：state\icons\<sha1(exe路径)>_<mtime>.png
-                Services.IconDiskCache.Init(Root);
+                Native.IconDiskCache.Init(Root);
 
                 // ★★ 并行预热采集：采集要起 AHK 进程（~250ms 主要是运行时加载），
                 //    与后面的配置解析/图标准备重叠，能省下大半等待。
@@ -481,6 +481,20 @@ namespace RunEverCs
                 + " 违规=" + decision.Violations.Count);
             long tMatch = swTotal.ElapsedMilliseconds;
 
+            // ★ U-A 一键直达（仅扩展名槽位，2026-11-09）：
+            //   结论位在 L1 算好（`MenuDecision.OneShot`），这里只做两件事 ——
+            //   ① 读 auto.conf 的 oneShot 开关（关 ⇒ null ⇒ 完全走原链路）
+            //   ② 命中就直接派发并 return（**不建菜单**：MenuBuilder / NativeMenu 零感知）。
+            var oneShot = decision.OneShotFor(_autoMatcher != null ? _autoMatcher.Conf : null);
+            if (oneShot != null)
+            {
+                Log("一键直达: " + oneShot.Title);
+                Dispatch(oneShot, ctx);
+                Log("菜单流程总耗时(不含用户等待) = "
+                    + swTotal.ElapsedMilliseconds + "ms（一键直达）");
+                return 0;
+            }
+
             // 图标解析
             _icons.ResolveAll(groups);
             long tIcon = swTotal.ElapsedMilliseconds;
@@ -496,6 +510,17 @@ namespace RunEverCs
                 + " 图标命中=" + built.IconHit + " 兜底=" + built.IconFallback
                 + " | 构建=" + MenuBuilder.LastBuildMs + "ms"
                 + "（条目=" + MenuBuilder.LastItemMs + " 图标=" + MenuBuilder.LastIconMs + "）");
+
+            // ★ F1：缺件隐藏后的空子菜单收尾 —— 一次弹菜单输出一行统计（无剪也输出 =0），
+            //   被剪标题单独一行便于排障。两个来源不同层：判定层剪枝（数据）+ 渲染护栏（最后一道闸）。
+            int prunedTrees = SubtreePruner.LastPrunedTotal + MenuBuilder.LastPrunedSubtrees;
+            Log("剪空子树=" + prunedTrees);
+            var prunedTitles = new List<string>(SubtreePruner.LastPrunedTitles);
+            prunedTitles.AddRange(MenuBuilder.LastPrunedTitles);
+            if (prunedTitles.Count > 0)
+                Log("空子菜单已剪: " + string.Join(",", prunedTitles.ToArray()));
+            SavePruneStat(hot.HiddenCount, prunedTrees);
+
             long tBuild = swTotal.ElapsedMilliseconds;
 
             // ★ B4a-2（P0 体验）：**全空菜单必须解释**。
@@ -1126,6 +1151,25 @@ namespace RunEverCs
             foreach (var g in groups)
                 if (g.Items != null) n += g.Items.Count;
             return n;
+        }
+
+        /// <summary>
+        /// 把最近一次弹菜单的「缺件隐藏 / 剪空子树」落到 state\menu-prune-last.txt，
+        /// 供诊断页只读展示（与 F1-4 的日志行**同源**：同一次计算的同一组数字）。
+        /// </summary>
+        private void SavePruneStat(int hidden, int pruned)
+        {
+            try
+            {
+                string f = Path.Combine(Root, "state", "menu-prune-last.txt");
+                string dir = Path.GetDirectoryName(f);
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(f,
+                    "隐藏=" + hidden + " 剪空=" + pruned
+                    + " 时间=" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                    new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         // ============================================================

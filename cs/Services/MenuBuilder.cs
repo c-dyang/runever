@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
 using RunEverCs.Models;
 using RunEverCs.Native;
@@ -30,14 +31,55 @@ namespace RunEverCs.Services
         public static long LastItemMs;
         public static long LastIconMs;
 
-        /// <summary>构建菜单（不显示，纯构建，供自检调用）。</summary>
+        /// <summary>本次构建里被**渲染护栏**挡掉的空壳子菜单数（正常为 0；与剪枝统计同源展示）。</summary>
+        public static int LastPrunedSubtrees;
+
+        /// <summary>本次构建里被挡掉的空壳子菜单标题（日志用）。</summary>
+        public static List<string> LastPrunedTitles = new List<string>();
+
+        // ============================================================
+        // ★ 2026-11-09（U-B）：`open sub <目录>` —— 渲染期动态子菜单
+        //   只在这条 open 落到**本次已命中**的段里才枚举（Win32 菜单无懒加载）；
+        //   枚举结果只进 NativeMenu / idmap，**绝不写回 menus.conf**。
+        // ============================================================
+
+        /// <summary>本次构建真的建出来的目录子菜单数（含递归展开的层级）。</summary>
+        public static int LastSubmenus;
+
+        /// <summary>本次构建动态生成的子项数（= 可点条目里来自目录枚举的那部分）。</summary>
+        public static int LastSubmenuItems;
+
+        /// <summary>本次构建里标记了 sub、但目录不存在/无权限/为空 ⇒ 退化为普通 open 的条目数。</summary>
+        public static int LastSubmenuFallbacks;
+
+        /// <summary>本次构建里目录枚举命中 mtime 缓存的次数（性能证据：第二遍构建不重扫）。</summary>
+        public static int LastDirCacheHits;
+
+        /// <summary>构建菜单（不显示，纯构建，供自检调用）。conf = null ⇒ 不展开子菜单（历史行为）。</summary>
         public static BuildResult Build(List<MenuGroup> groups)
+        {
+            return Build(groups, null);
+        }
+
+        /// <summary>
+        /// 构建菜单。<paramref name="conf"/> = auto.conf 的内存快照（AutoMatcher.Conf）。
+        /// ★ 只有 <c>SubmenuEnabled=1</c> 才展开 `open sub`；其余键（limit/order/recursive/depth）
+        ///   全来自这一份快照 —— 与 AutoMatcher 的解析同源，不在这里重读文件。
+        /// </summary>
+        public static BuildResult Build(List<MenuGroup> groups, AutoConf conf)
         {
             var swAll = System.Diagnostics.Stopwatch.StartNew();
             long iconMs = 0;
             var root = new NativeMenu();
             var idmap = new Dictionary<int, MenuItem>();
             int total = 0, iconHit = 0, iconFallback = 0;
+
+            LastPrunedSubtrees = 0;
+            LastPrunedTitles = new List<string>();
+            LastSubmenus = 0;
+            LastSubmenuItems = 0;
+            LastSubmenuFallbacks = 0;
+            LastDirCacheHits = 0;
 
             // ★ 重置全局 ID 分配器：保证本次菜单树内 ID 唯一且从 1 起
             //   （跨菜单实例共享分配器 ⇒ 子菜单不再与根菜单撞 ID）
@@ -50,6 +92,10 @@ namespace RunEverCs.Services
             {
                 if (g.Items.Count == 0) continue;
 
+                // ★ 渲染护栏：子树里没有任何可点条目 ⇒ 连子菜单都不建（永不生成 0 项子菜单）
+                var emptyShells = FindEmptyShells(g.Items);
+                if (emptyShells.Count >= g.Items.Count) continue;    // 整组都是空壳 ⇒ 不占一行/一条分隔线
+
                 // 组间分隔线（第一组不加）
                 if (!firstGroup) root.AddSeparator();
                 firstGroup = false;
@@ -61,6 +107,7 @@ namespace RunEverCs.Services
                 int prevLevel = 0;
                 foreach (var it in g.Items)
                 {
+                    if (it == null || emptyShells.Contains(it)) continue;
                     int lv = it.Level;
 
                     // 从 prevLevel 走到 lv：上读时弹栈
@@ -91,6 +138,36 @@ namespace RunEverCs.Services
                     }
                     else
                     {
+                        // ★ U-B：`open sub <目录>` —— 目录可枚举就当场建子菜单，否则落到下面的普通叶分支
+                        if (it.Type == ActionType.Open && it.Sub && conf != null && conf.SubmenuEnabled == 1)
+                        {
+                            var sr = TryBuildDirectoryMenu(it.Target, conf, 1, idmap);
+                            if (sr != null)
+                            {
+                                int subIdx = target.AddSubMenu(
+                                    FormatMenuText(it.Title, it.Hotkey, true), sr.Menu);
+
+                                // 子菜单项本身用系统文件夹图标（popup 项没有命令 ID ⇒ 按位置设）
+                                long tIconS = System.Diagnostics.Stopwatch.GetTimestamp();
+                                if (target.SetFolderIconByPosition(subIdx)) iconHit++;
+                                else iconFallback++;
+                                iconMs += (System.Diagnostics.Stopwatch.GetTimestamp() - tIconS)
+                                          * 1000L / System.Diagnostics.Stopwatch.Frequency;
+
+                                total += sr.Items;
+                                iconHit += sr.IconHit;
+                                iconFallback += sr.IconFallback;
+                                LastSubmenus += 1 + sr.Submenus;
+                                LastSubmenuItems += sr.Items;
+
+                                prevLevel = lv;
+                                continue;
+                            }
+
+                            // 目录不存在/无权限/为空 ⇒ 退化普通 open（绝不建空子菜单）
+                            LastSubmenuFallbacks++;
+                        }
+
                         // 叶条目
                         string text = FormatMenuText(it.Title, it.Hotkey, false);
 
@@ -202,6 +279,244 @@ namespace RunEverCs.Services
             }
 
             return title;
+        }
+
+        /// <summary>
+        /// 渲染护栏：找出"子树里没有任何可点条目"的组标题，连同其整棵子树一起返回（调用方跳过不渲染）。
+        ///
+        /// 为什么还要这一层：剪枝是数据层的收尾，但渲染是最后一道闸 —— 任何来源的分组列表
+        /// （自检构造 / 未来新调用方）都不该让 Win32 建出 0 项 popup（点开一片空白）。
+        /// 判据只看"这个标题跨度内有没有非标题条目"，与层级栈口径一致。
+        /// </summary>
+        private static HashSet<MenuItem> FindEmptyShells(IList<MenuItem> items)
+        {
+            var hide = new HashSet<MenuItem>();
+            if (items == null) return hide;
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var it = items[i];
+                if (it == null || !it.IsGroupHeader) continue;
+
+                int j = i + 1;
+                int visible = 0;
+                while (j < items.Count && items[j] != null && items[j].Level > it.Level)
+                {
+                    if (!items[j].IsGroupHeader) visible++;
+                    j++;
+                }
+
+                if (visible > 0) continue;
+
+                for (int m = i; m < j; m++) hide.Add(items[m]);
+                LastPrunedSubtrees++;
+                LastPrunedTitles.Add(it.Title);
+                i = j - 1;
+            }
+            return hide;
+        }
+
+        // ============================================================
+        // ★ U-B：目录子菜单（渲染期枚举，不写回配置）
+        // ============================================================
+
+        /// <summary>一个目录的枚举快照（按目录 mtime 缓存；只读）。</summary>
+        private sealed class DirListing
+        {
+            public long Stamp;                                   // 目录 LastWriteTimeUtc.Ticks
+            public readonly List<string> Dirs = new List<string>();
+            public readonly List<string> Files = new List<string>();
+        }
+
+        /// <summary>一棵动态子菜单的构建产物（计数回传给 Build 汇总）。</summary>
+        private sealed class SubMenuBuild
+        {
+            public NativeMenu Menu;
+            public int Items;
+            public int IconHit;
+            public int IconFallback;
+            public int Submenus;
+        }
+
+        /// <summary>目录枚举缓存：mtime 未变 ⇒ 0 次目录枚举（只 stat 一次）。</summary>
+        private static readonly Dictionary<string, DirListing> DirCache =
+            new Dictionary<string, DirListing>(StringComparer.OrdinalIgnoreCase);
+        private static readonly object DirCacheLock = new object();
+
+        /// <summary>缓存上限（超过就整体清空 —— 菜单只碰用户点过的那几个目录，64 足够）。</summary>
+        private const int DirCacheLimit = 64;
+
+        /// <summary>
+        /// 把一条 `open sub` 的目录展开成一棵子菜单。
+        /// 返回 null = **退化普通 open**（目录不存在 / 无权限 / 为空 / 枚举异常）。
+        ///
+        /// depth 从 1 起（第一层展开 = 1）；只有 `SubmenuRecursive=1` 且
+        /// `depth &lt; SubmenuDepth` 时才把子目录再展开 —— 默认递归关，只展开一层。
+        /// </summary>
+        private static SubMenuBuild TryBuildDirectoryMenu(string target, AutoConf conf, int depth,
+            Dictionary<int, MenuItem> idmap)
+        {
+            string dir = NormalizeDirectoryTarget(target);
+            if (dir.Length == 0) return null;
+
+            var dirs = new List<string>();
+            var files = new List<string>();
+            if (!ReadDirectory(dir, dirs, files)) return null;
+
+            // ---- 排序：folder-first（目录在前）/ name（纯按名称）----
+            var ordered = new List<KeyValuePair<string, bool>>();   // Key = 全路径，Value = 是否目录
+            bool byName = string.Equals(conf.SubmenuOrder, "name", StringComparison.OrdinalIgnoreCase);
+            if (byName)
+            {
+                foreach (var d in dirs) ordered.Add(new KeyValuePair<string, bool>(d, true));
+                foreach (var f in files) ordered.Add(new KeyValuePair<string, bool>(f, false));
+                ordered.Sort(delegate (KeyValuePair<string, bool> a, KeyValuePair<string, bool> b)
+                {
+                    return StringComparer.CurrentCultureIgnoreCase.Compare(
+                        Path.GetFileName(a.Key), Path.GetFileName(b.Key));
+                });
+            }
+            else
+            {
+                // ReadDirectory 已按名称排好；目录段在前，文件段在后
+                foreach (var d in dirs) ordered.Add(new KeyValuePair<string, bool>(d, true));
+                foreach (var f in files) ordered.Add(new KeyValuePair<string, bool>(f, false));
+            }
+
+            // ---- 上限截断（防大目录把菜单撑爆）----
+            int limit = conf.SubmenuLimit;
+            if (limit < 1) limit = 1;
+            if (ordered.Count > limit) ordered.RemoveRange(limit, ordered.Count - limit);
+
+            // 空目录 / 全被过滤 ⇒ 不建子菜单（与 F1 剪枝口径一致）
+            if (ordered.Count == 0) return null;
+
+            var menu = new NativeMenu();
+            var result = new SubMenuBuild { Menu = menu };
+            try
+            {
+                foreach (var e in ordered)
+                {
+                    string name = Path.GetFileName(e.Key);
+                    if (name.Length == 0) name = e.Key;
+                    // 文件名里的 & 在 Win32 菜单里是助记符前缀 ⇒ 双写才是字面量（"R&D.txt" 不能变成 R_D.txt）
+                    string label = name.Replace("&", "&&");
+
+                    // 递归：只有显式开启且还没到层数上限
+                    if (e.Value && conf.SubmenuRecursive == 1 && depth < conf.SubmenuDepth)
+                    {
+                        var nested = TryBuildDirectoryMenu(e.Key, conf, depth + 1, idmap);
+                        if (nested != null)
+                        {
+                            int idx = menu.AddSubMenu(label, nested.Menu);
+                            if (menu.SetFolderIconByPosition(idx)) result.IconHit++;
+                            else result.IconFallback++;
+
+                            result.Items += nested.Items;
+                            result.Submenus += 1 + nested.Submenus;
+                            continue;
+                        }
+                    }
+
+                    // 叶：点它 = open 这个文件/目录（与普通 open 条目同一条派发路径）
+                    int id = menu.AddItem(label);
+                    idmap[id] = new MenuItem
+                    {
+                        Title = name,
+                        Type = ActionType.Open,
+                        Target = e.Key,
+                        Level = 0
+                    };
+                    result.Items++;
+
+                    int pos = menu.Count() - 1;
+                    bool iconOk = e.Value ? menu.SetFolderIconByPosition(pos)
+                                          : menu.SetFileIconByPosition(pos);
+                    if (iconOk) result.IconHit++;
+                    else result.IconFallback++;
+                }
+            }
+            catch
+            {
+                // 建菜单中途失败 ⇒ 整棵丢弃，调用方退化为普通 open
+                menu.Dispose();
+                return null;
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 读一个目录（缓存优先）。返回 false = 不存在 / 无权限 / IO 错 ⇒ 调用方退化普通 open。
+        /// ★ 缓存键 = 目录全路径；失效判据 = 目录 LastWriteTimeUtc（增删条目才会变）。
+        ///   命中缓存时只花一次 stat，不枚举整棵树 —— 这是"每次弹菜单不重扫"的关键。
+        /// </summary>
+        private static bool ReadDirectory(string dir, List<string> outDirs, List<string> outFiles)
+        {
+            DirectoryInfo di;
+            long stamp;
+            try
+            {
+                di = new DirectoryInfo(dir);
+                if (!di.Exists) return false;
+                stamp = di.LastWriteTimeUtc.Ticks;
+            }
+            catch { return false; }
+
+            lock (DirCacheLock)
+            {
+                DirListing hit;
+                if (DirCache.TryGetValue(dir, out hit) && hit.Stamp == stamp)
+                {
+                    outDirs.AddRange(hit.Dirs);
+                    outFiles.AddRange(hit.Files);
+                    LastDirCacheHits++;
+                    return true;
+                }
+            }
+
+            var fresh = new DirListing { Stamp = stamp };
+            try
+            {
+                foreach (var fsi in di.GetFileSystemInfos())
+                {
+                    try
+                    {
+                        FileAttributes a = fsi.Attributes;
+                        // 隐藏/系统条目不进菜单（与资源管理器默认视图口径一致）
+                        if ((a & (FileAttributes.Hidden | FileAttributes.System)) != 0) continue;
+                        if ((a & FileAttributes.Directory) != 0) fresh.Dirs.Add(fsi.FullName);
+                        else fresh.Files.Add(fsi.FullName);
+                    }
+                    catch { }   // 单个条目读属性失败 ⇒ 跳过，不影响整目录
+                }
+            }
+            catch { return false; }
+
+            fresh.Dirs.Sort(StringComparer.CurrentCultureIgnoreCase);
+            fresh.Files.Sort(StringComparer.CurrentCultureIgnoreCase);
+
+            outDirs.AddRange(fresh.Dirs);
+            outFiles.AddRange(fresh.Files);
+
+            lock (DirCacheLock)
+            {
+                if (DirCache.Count >= DirCacheLimit) DirCache.Clear();
+                DirCache[dir] = fresh;
+            }
+            return true;
+        }
+
+        /// <summary>目标 → 目录路径：去首尾空白与包裹引号，展开环境变量。空串 = 不可用。</summary>
+        private static string NormalizeDirectoryTarget(string target)
+        {
+            string t = (target ?? "").Trim();
+            if (t.Length >= 2 && t[0] == '"' && t[t.Length - 1] == '"')
+                t = t.Substring(1, t.Length - 2).Trim();
+            if (t.Length == 0) return "";
+            try { t = Environment.ExpandEnvironmentVariables(t); }
+            catch { }
+            return t;
         }
 
         /// <summary>递归收集菜单树里所有叶条目的命令 ID（用于跨菜单冲突检测）。</summary>

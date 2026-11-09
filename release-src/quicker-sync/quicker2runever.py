@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Quicker 右键菜单动作 config -> RunEver menus.conf 转换器（一次性工具，非交付脚本）。"""
-import re, sys, io
+import re, sys, io, os
 
 SRC = os.environ.get("QUICKER_SRC", "quicker-menu-source.txt")   # 原始导出（自备）
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "menus.quicker-sync.conf")
@@ -150,20 +150,26 @@ for blk in logical:
         continue
 
     indent = "  " * level
-    # 值空 或 值为字面量 \t ⇒ Quicker 里就是「纯子菜单标题」，无动作
-    if val == "" or val == "\\t":
-        out.append("%s%s  | group" % (indent, nm))
-        stats["item"] += 1
-        continue
+    # ★ 目标为空 ⇒ 一律 group（Quicker 里就是「纯子菜单标题」，无动作）。
+    #   判定放在「算出 target 之后」，口径只有一处，覆盖全部空目标形态：
+    #     val==""     值空                 （如   PCTools|   ）
+    #     val=="\t"   字面量转义            （Quicker 导出里的空动作写法）
+    #     val=="^"    只有「程序^参数」的分隔符、程序为空（如   清理工具|^   ）
+    #     val=="动作=" 动作 ID 为空
+    #   早先只认前两种，`清理工具|^` 会落到 else 分支、target 为空串，
+    #   产出「非 group 父条目 + 空目标 + 带子项」的空节点（F2 的成因）。
+    if val == "\\t":
+        val = ""
 
     if val.startswith("动作="):
-        target = "quicker:runaction:" + val[len("动作="):].strip()
+        action = val[len("动作="):].strip()
+        target = ("quicker:runaction:" + action) if action else ""
         act = "url"
-        stats["act"] += 1
+        stat_key = "act"
     elif SCHEME_RE.match(val):
         target = val
         act = "url"
-        stats["url"] += 1
+        stat_key = "url"
     else:
         if "^" in val:
             prog, args = val.split("^", 1)
@@ -171,6 +177,15 @@ for blk in logical:
         else:
             target = val.strip()
         act = "run"
+        stat_key = None
+
+    if target == "":
+        out.append("%s%s  | group" % (indent, nm))
+        stats["item"] += 1
+        continue
+
+    if stat_key:
+        stats[stat_key] += 1
 
     key = ("  _%s  " % mn) if mn else "  "
     out.append("%s%s%s| %s %s" % (indent, nm, key, act, target))
@@ -179,3 +194,37 @@ for blk in logical:
 io.open(OUT, "w", encoding="utf-8", newline="\n").write("\n".join(out) + "\n")
 print("wrote", OUT)
 print("stats", stats)
+
+# ---- 2) 可选：合并版（--merged）—— 把多余的 always 组收成首个 always 组下的子菜单 ----
+# 忠实版保留 3 个 always 组会违反 RunEver 契约 I-3（预设四类各至多一个），
+# 合并版把「个人工具箱」「游戏」降级成 `| group` 子菜单，分组数 17 -> 15。
+if "--merged" in sys.argv:
+    body = [ln for ln in out if not ln.startswith("#")]
+    while body and body[0].strip() == "":
+        body.pop(0)
+
+    blocks = []
+    for ln in body:
+        if ln.startswith("!"):
+            blocks.append((ln, []))
+        elif ln.strip():
+            blocks[-1][1].append(ln)
+
+    always = [i for i, b in enumerate(blocks) if b[0].rstrip().endswith(" always")]
+    host, extras = always[0], always[1:]
+
+    merged = []
+    for i, (head, items) in enumerate(blocks):
+        if i in extras:
+            continue
+        merged.append(head)
+        merged.extend(items)
+        if i == host:
+            for j in extras:
+                merged.append("  %s  | group" % re.split(r"\s{2,}", blocks[j][0][1:].strip())[0])
+                merged.extend("  " + ln for ln in blocks[j][1])
+            merged.append("")          # 与既有合并版一致：折叠块后留一空行
+
+    mout = os.path.join(os.path.dirname(OUT), "menus.quicker.merged.conf")
+    io.open(mout, "w", encoding="utf-8", newline="\n").write("\n".join(merged) + "\n")
+    print("wrote", mout, "(blocks=%d, always=%d)" % (len(blocks), len(always)))

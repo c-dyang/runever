@@ -80,7 +80,11 @@ namespace RunEverCs.Views
             if (t.Length == 0 && s.Length > 0) return "Space";
             return t;
         }
-        /// <summary>分区标题（微软用 BodyStrong；这里 14px 半粗 + 上下留白）。</summary>
+        /// <summary>
+        /// 分区标题（微软用 BodyStrong；这里 14px 半粗 + 上下留白）。
+        /// ★ 2026-11-09（A3）：上下留白 20/8 → 16/6 —— 默认窗口高 780 DIP 里要装下
+        ///   「日志 / 诊断 / 关于」三小节共 12 行只读信息，三处标题各让 6px，肉眼无感。
+        /// </summary>
         public static TextBlock SectionHeader(string text)
         {
             return new TextBlock
@@ -89,7 +93,7 @@ namespace RunEverCs.Views
                 FontSize = 14,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = TextPrimary,
-                Margin = new Thickness(2, 20, 0, 8)
+                Margin = new Thickness(2, 14, 0, 5)
             };
         }
 
@@ -256,19 +260,118 @@ namespace RunEverCs.Views
             return Row(header, desc, b);
         }
 
-        /// <summary>只读信息行（路径、版本这类）。</summary>
+        /// <summary>
+        /// 只读信息行（路径、版本这类）。
+        ///
+        /// ★ 2026-11-09（A1）：原来返回**只读 TextBox**（宽 420 写死）——
+        ///   ① 长得像能改（用户原话「信息类字段用了像输入框的控件」），
+        ///   ② 宽度写死 420，长路径被切开、短值右侧一片空，
+        ///   ③ 每行 MinHeight 40 ⇒ 关于页 8 行要两屏。
+        ///   现在：**纯 TextBlock**（不参与焦点、不可编辑）+ 值列 Star 拉伸填满 + 紧凑行高。
+        ///   超长值 Wrap 换行并限高 3 行，超出部分省略号，全文进 ToolTip。
+        ///   路径类值支持双击复制 / 右键「复制」（只给路径开，普通说明文字不给，免得看着像可交互）。
+        /// </summary>
         public static Grid Info(string header, string value)
         {
-            var tb = new TextBox
+            string text = value ?? "";
+
+            var val = new TextBlock
             {
-                Text = value ?? "",
-                IsReadOnly = true,
-                Width = 420,
-                Padding = new Thickness(6, 4, 6, 4),
+                Text = text,
+                FontSize = 12.5,
                 Foreground = TextSecondary,
-                Background = new SolidColorBrush(Color.FromRgb(0xFA, 0xFA, 0xFA))
+                TextWrapping = TextWrapping.Wrap,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                MaxHeight = 48,          // ≈3 行；再长就走 ToolTip，不靠纵向滚动
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                ToolTip = text.Length > 0 ? text : null,
+                // ★ 必须给透明底色：WPF 里 Background=null 的元素**不参与命中测试**，
+                //   双击/右键就永远收不到事件（透明 ≠ 无）。视觉上无差别。
+                Background = Brushes.Transparent
             };
-            return Row(header, null, tb);
+
+            if (LooksLikePath(text))
+            {
+                val.ToolTip = text + "\n（双击或右键可复制）";
+                val.MouseLeftButtonDown += (s, e) =>
+                {
+                    if (e.ClickCount == 2) CopyText(text);
+                };
+                var copy = new MenuItem { Header = "复制" };
+                copy.Click += (s, e) => CopyText(text);
+                var cm = new ContextMenu();
+                cm.Items.Add(copy);
+                val.ContextMenu = cm;
+            }
+
+            // 标签列定宽：同一页里所有 Info 行的值左边缘对齐（各行是独立 Grid，靠定宽对齐）
+            // ★ 行高 24 + 上下 5：只读行没有交互控件，不需要输入框那套 40 的触控留白；
+            //   实测这一档能把「诊断」页 12 行压进默认窗口（780 DIP）一屏内。
+            var g = new Grid { Margin = new Thickness(16, 4, 16, 4), MinHeight = 24 };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(190) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var lab = new TextBlock
+            {
+                Text = header,
+                FontSize = 12.5,
+                Foreground = TextPrimary,
+                TextWrapping = TextWrapping.Wrap,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 16, 0)
+            };
+            Grid.SetColumn(lab, 0);
+            g.Children.Add(lab);
+            Grid.SetColumn(val, 1);
+            g.Children.Add(val);
+            return g;
+        }
+
+        /// <summary>
+        /// **描述性整块**：一段说明文字（内含 `\n` 即多行），放进卡片里做**一整块**。
+        ///
+        /// ★ 2026-11-09（U1）：用户截图指出「这些都是可以写一整块的，本身不应该占一条」。
+        ///   「生效方式 / 哪一档为空 / 分组内条目的先后」这类解释性长句，原来走 `Info()`
+        ///   ⇒ 190px 标签列 + 值列逐条排，视觉上是三行等宽表格，读起来像**配置项**，
+        ///   而且每条还要一条 hairline、一次 4px 上下留白，三个短句撑出半屏。
+        ///   现在合成一整段灰字：无标签列、行距 19、Wrap 铺满整卡宽度，一屏读得完，
+        ///   也不再"看起来像可以改的东西"。
+        ///
+        /// 用法分界：**短值/路径/版本 → `Info()`**（要对齐、要能双击复制）；
+        /// **说明性段落 → `Note()`**（不必对齐、不参与交互）。
+        /// </summary>
+        public static TextBlock Note(string text)
+        {
+            return new TextBlock
+            {
+                Text = text ?? "",
+                FontSize = 12,
+                Foreground = TextSecondary,
+                TextWrapping = TextWrapping.Wrap,
+                LineHeight = 19,
+                LineStackingStrategy = LineStackingStrategy.BlockLineHeight,
+                Margin = new Thickness(16, 9, 16, 9),
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+        }
+
+        /// <summary>值是否"像路径"（决定要不要给双击/右键复制）—— 不猜语义，只看形态。</summary>
+        private static bool LooksLikePath(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            s = s.Trim();
+            if (s.IndexOf('\\') >= 0) return true;                    // D:\x / dist\x / assets\x.ico
+            if (s.StartsWith("/")) return true;                       // UNC（//nas/share）与 POSIX 风格
+            return s.Length > 2 && char.IsLetter(s[0]) && s[1] == ':'
+                && (s[2] == '\\' || s[2] == '/');                       // C:/x
+        }
+
+        /// <summary>复制到剪贴板；被别的进程占用时静默失败（为一次复制弹错误框不值当）。</summary>
+        private static void CopyText(string s)
+        {
+            try { if (!string.IsNullOrEmpty(s)) Clipboard.SetText(s); }
+            catch { }
         }
 
         /// <summary>
@@ -279,13 +382,15 @@ namespace RunEverCs.Views
         ///   StackPanel 按**内容自然宽度**排布 ⇒ 卡片只有 ~900px 宽，窗口拉大后
         ///   右侧一大片空白，看着像固定宽度。
         ///   现在改成 Stretch（填满内容区），只保留一个更宽松的上限防止超宽屏行太长。
+        ///   ★ 2026-11-09（A3）：下留白 28 → 12（最后一张卡自带 4px 外边距，12 已够）——
+        ///     「诊断」页 12 行只读信息要在默认窗口高度里一屏装下，这 16px 就是压垮它的最后一根稻草。
         /// </summary>
         public static ScrollViewer PageHost(UIElement content)
         {
             var inner = new StackPanel
             {
                 MaxWidth = 1400,          // 超宽屏时才生效；正常窗口下填满
-                Margin = new Thickness(28, 8, 28, 28),
+                Margin = new Thickness(28, 8, 28, 12),
                 HorizontalAlignment = HorizontalAlignment.Stretch
             };
             inner.Children.Add(content);

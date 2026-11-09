@@ -92,60 +92,35 @@ namespace RunEverCs.Services
 
             foreach (var g in groups)
             {
-                var ng = new MenuGroup
+                // ① 逐条判定（克隆后保留）：叶条目判缺件，组标题一律先留
+                var src = new List<MenuItem>();
+                var keep = new HashSet<MenuItem>();
+                var origin = g.Items;
+                for (int i = 0; i < origin.Count; i++)
                 {
-                    Name = g.Name,
-                    Type = g.Type,
-                    Keywords = g.Keywords,
-                    Line = g.Line,
-                    Items = new List<MenuItem>()
-                };
+                    var it = origin[i];
+                    if (it == null) continue;
+                    var copy = it.Clone();
+                    src.Add(copy);
 
-                var src = g.Items;
-                for (int i = 0; i < src.Count; i++)
-                {
-                    var it = src[i];
-
-                    // ---- 子菜单标题：子项全被隐藏 ⇒ 标题也不显示（免得留个点了没反应的空壳）----
                     if (it.IsGroupHeader)
                     {
-                        int j = i + 1;
-                        while (j < src.Count && src[j].Level > it.Level) j++;
-
-                        bool hasChildren = (j > i + 1);
-                        bool anyKeep = false;
-                        for (int k = i + 1; k < j; k++)
-                        {
-                            if (Peek(src[k], cache) != Decision.Drop) { anyKeep = true; break; }
-                        }
-
-                        if (hasChildren && !anyKeep)
-                        {
-                            res.Hidden++;
-                            res.HiddenTitles.Add(it.Title + "（空子菜单）");
-                            if (log != null)
-                                log("缺件隐藏: [" + g.Name + "] " + it.Title + "（子项全部本机缺失）");
-                            continue;
-                        }
-
-                        ng.Items.Add(it.Clone());
+                        keep.Add(copy);
                         continue;
                     }
 
-                    // ---- 普通条目：判定 + 一次计数 ----
                     var d = Peek(it, cache);
-
                     if (d == Decision.Skip)
                     {
                         res.Skipped++;
-                        ng.Items.Add(it.Clone());
+                        keep.Add(copy);
                         continue;
                     }
 
                     res.Checked++;
                     if (d == Decision.Keep)
                     {
-                        ng.Items.Add(it.Clone());
+                        keep.Add(copy);
                     }
                     else
                     {
@@ -156,7 +131,27 @@ namespace RunEverCs.Services
                     }
                 }
 
-                outGroups.Add(ng);
+                // ② 后序剪枝（与判定层同一实现）：子树可见数 = 0 的节点整棵丢
+                var stat = new SubtreePruner.PruneStat();
+                var kept = SubtreePruner.Prune(src, keep, stat);
+                for (int t = 0; t < stat.Titles.Count; t++)
+                {
+                    res.Hidden++;
+                    res.HiddenTitles.Add(stat.Titles[t] + "（空子菜单）");
+                    if (log != null)
+                        log("缺件隐藏: [" + g.Name + "] " + stat.Titles[t] + "（子项全部本机缺失）");
+                }
+
+                var ng = new MenuGroup
+                {
+                    Name = g.Name,
+                    Type = g.Type,
+                    Keywords = g.Keywords,
+                    Line = g.Line,
+                    Items = kept
+                };
+
+                if (ng.Items.Count > 0) outGroups.Add(ng);
             }
 
             if (log != null && res.Hidden > 0)

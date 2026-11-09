@@ -55,6 +55,68 @@ namespace RunEverCs
                 ok(d2.DynamicCount == 1 && d2.Dynamic[0].Name == "PDF" && d2.Rule == "R2",
                     "R2 扩展名恰好命中 1 个 ext 组 ⇒ 该组（rule=" + d2.Rule + "）");
 
+                // ---------------- U-A 一键直达（仅扩展名槽位；L1 结论 + 消费点开关） ----------------
+                sb.AppendLine();
+                sb.AppendLine("--- U-A 一键直达（扩展名槽位唯一可执行条目）---");
+
+                // ① 唯一可执行条目（run）⇒ 给出直达目标
+                var osCfg = ExtOnlyConfig(new[] { It("用 Word 打开", ActionType.Run, "winword.exe", 1) });
+                var os1 = MatchEngine.Decide(Ctx(exts: new[] { "docx" }, files: 1), osCfg);
+                ok(os1.OneShot != null && os1.OneShot.Title == "用 Word 打开"
+                    && os1.OneShotReason.IndexOf("唯一", StringComparison.Ordinal) >= 0,
+                    "U-A 扩展名槽位剪枝后恰 1 个可执行条目 ⇒ OneShot 指向该条（" + os1.OneShotReason + "）");
+
+                // ② 两个可执行条目 ⇒ 不直达（让用户选）
+                var os2 = MatchEngine.Decide(Ctx(exts: new[] { "docx" }, files: 1), ExtOnlyConfig(new[]
+                {
+                    It("用 Word 打开", ActionType.Run, "winword.exe", 1),
+                    It("用写字板打开", ActionType.Run, "write.exe", 1)
+                }));
+                ok(os2.OneShot == null && os2.OneShotReason.IndexOf("=2", StringComparison.Ordinal) >= 0,
+                    "U-A 两个可执行条目 ⇒ 不直达（" + os2.OneShotReason + "）");
+
+                // ③ action / send / keys 一律禁直达（用户 2026-11-09 明文口径）
+                foreach (var t in new[] { ActionType.Action, ActionType.Send, ActionType.Keys })
+                {
+                    var dt = MatchEngine.Decide(Ctx(exts: new[] { "docx" }, files: 1),
+                        ExtOnlyConfig(new[] { It("副作用动作", t, "x", 1) }));
+                    ok(dt.OneShot == null && dt.OneShotReason.IndexOf("类型禁止", StringComparison.Ordinal) >= 0,
+                        "U-A " + t.ToString().ToLowerInvariant() + " 命中 ⇒ 强制退化弹菜单（" + dt.OneShotReason + "）");
+                }
+
+                // ④ 计数按**剪枝之后**：两条里缺件隐藏一条 ⇒ 实际 1 条 ⇒ 才直达
+                var osPruneCtx = Ctx(exts: new[] { "docx" }, files: 1);
+                osPruneCtx.MissingItemIndex = new HashSet<int> { 1 };
+                var osPrune = MatchEngine.Decide(osPruneCtx, ExtOnlyConfig(new[]
+                {
+                    It("保留项", ActionType.Run, "winword.exe", 1),
+                    It("缺件项", ActionType.Run, "not-exist-xyz.exe", 1)
+                }));
+                ok(osPrune.OneShot != null && osPrune.OneShot.Title == "保留项",
+                    "U-A 计数在剪枝之后：缺件隐藏一条 ⇒ 恰 1 条 ⇒ 直达（原始条目数=2 不能算 2）");
+
+                // ⑤ always / fallback / 文本槽位都不参与
+                var osFb = MatchEngine.Decide(Ctx(exts: new[] { "xyz" }, files: 1), cfg);
+                ok(osFb.OneShot == null && osFb.Dynamic[0].Type == GroupType.Fallback,
+                    "U-A 兜底段不参与直达（扩展名 0 命中 ⇒ 弹菜单）");
+                var osText = MatchEngine.Decide(Ctx(text: "t"), cfg);
+                ok(osText.OneShot == null, "U-A 文本槽位不参与直达");
+                var osAlwaysCfg = new List<MenuGroup> { G("固定", GroupType.Always) };
+                osAlwaysCfg[0].Items.Add(It("设置", ActionType.Run, "RunEverCs.exe --settings", 1));
+                var osAlways = MatchEngine.Decide(new MatchContext(), osAlwaysCfg);
+                ok(osAlways.AlwaysCount == 1 && osAlways.OneShot == null,
+                    "U-A always 段不参与直达（哪怕整段只有 1 个可执行条目）");
+
+                // ⑥ 开关：0 ⇒ 退化弹菜单；1 ⇒ 采用 L1 结论
+                ok(os1.OneShotFor(new AutoConf { OneShot = 0 }) == null,
+                    "U-A oneShot=0 ⇒ OneShotFor=null（退化弹菜单）");
+                ok(ReferenceEquals(os1.OneShotFor(new AutoConf { OneShot = 1 }), os1.OneShot),
+                    "U-A oneShot=1 ⇒ OneShotFor 返回 L1 结论");
+
+                // ⑦ 只加数据位：既有出口 Flat(order) 与默认序逐项一致
+                ok(Names(os1.Flat(MenuOrderSpec.Parse(""))) == Names(os1.Flat()),
+                    "U-A Flat(order) 既有行为不变（菜单段序唯一出口）");
+
                 // ---------------- R3 ----------------
                 var d3 = MatchEngine.Decide(Ctx(exts: new[] { "pdf", "txt" }, files: 1), cfg);
                 ok(d3.FallbackShown && d3.DynamicCount == 1 && d3.Dynamic[0].Name == "兜底"
@@ -351,6 +413,14 @@ namespace RunEverCs
             fb.Items.Add(It("子菜单", ActionType.Group, "", 0));
             fb.Items.Add(It("子项", ActionType.Run, "not-exist-xyz.exe", 1));
             return new List<MenuGroup> { fb };
+        }
+
+        /// <summary>只有一个 ext 组（扩展名 docx）的配置 —— U-A 一键直达用例专用。</summary>
+        private static List<MenuGroup> ExtOnlyConfig(IEnumerable<MenuItem> items)
+        {
+            var ext = G("DOCX", GroupType.Ext, "docx");
+            foreach (var it in items) ext.Items.Add(it);
+            return new List<MenuGroup> { ext };
         }
 
         private static MenuGroup G(string name, GroupType t, params string[] kw)

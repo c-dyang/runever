@@ -443,6 +443,614 @@ namespace RunEverCs
                 bool freshOk = freshWriter.Save(new List<MenuGroup>(), out freshMsg);
                 Chk("⑰i 原文件不存在时允许写（首次创建不被拦）",
                     freshOk && File.Exists(freshConf), freshMsg);
+
+                // ============================================================
+                // ⑳ L5：动作类型下拉 —— 中文显示 / 英文落盘（值/显示分离）
+                //   ① 7 个合法类型各自「显示中文 ⇄ 落盘英文」双向一致
+                //   ② 先选中文项再保存 ⇒ menus.conf 该行**不含中文**
+                //   ③ 非法值（cmd）必须报错，且**不改**条目的类型
+                // ============================================================
+                try
+                {
+                    var probe = new MItem { Title = "zz-l5-type-probe", Level = 1 };
+                    var types = new[]
+                    {
+                        ActionType.Group, ActionType.Run, ActionType.Open, ActionType.Url,
+                        ActionType.Action, ActionType.Send, ActionType.Keys
+                    };
+                    var badTypes = new List<string>();
+                    foreach (var t in types)
+                    {
+                        string disp = MenuEditorPage.ActionTypeDisplay(t);
+                        string key = MenuEditorPage.ActionTypeKey(t);
+
+                        // 先把类型拨到"别的"值 ⇒ 保证下一次选中真的触发 SelectionChanged
+                        probe.Type = t == ActionType.Group ? ActionType.Run : ActionType.Group;
+                        page.T_ShowFields(probe);
+                        bool picked = page.T_SelectTypeByDisplay(disp);
+
+                        // 正向：中文项 → 模型类型；下拉选中项的 Tag 仍是英文键
+                        bool fwd = picked && probe.Type == t
+                                   && page.T_TypeComboSelectedKey() == key
+                                   && page.T_TypeComboSelectedDisplay() == disp
+                                   && !string.IsNullOrEmpty(disp) && IsCjk(disp) && disp != key;
+
+                        // 反向：英文键 → 严格解析回同一类型；落盘行用英文键
+                        //   （group + 空目标 ⇒ 文法上根本不写 `| 类型` 段，这时按"无类型段"判）
+                        ActionType back;
+                        bool revParsed = MenuEditorPage.TryParseActionTypeKey(key, out back) && back == t;
+                        string line = MenuConfWriter.FormatItem(probe);
+                        string tok = TypeToken(line);
+                        bool rev = revParsed && !IsCjk(line)
+                                   && (tok == key || (t == ActionType.Group && tok == ""));
+
+                        if (!(fwd && rev))
+                            badTypes.Add(key + "/" + disp + " fwd=" + fwd + " rev=" + rev);
+                    }
+                    Chk("⑳ 7 个合法类型「中文显示 ⇄ 英文落盘」双向一致", badTypes.Count == 0,
+                        badTypes.Count == 0 ? "7/7" : string.Join("; ", badTypes.ToArray()));
+
+                    var pairs = page.T_TypeComboPairs();
+                    var seenDisp = new HashSet<string>();
+                    bool tagsLegal = true;
+                    foreach (var p in pairs)
+                    {
+                        seenDisp.Add(p.Value);
+                        ActionType x;
+                        if (IsCjk(p.Key) || !MenuEditorPage.TryParseActionTypeKey(p.Key, out x)) tagsLegal = false;
+                    }
+                    Chk("⑳b 下拉 = 7 项、显示全中文互不重复、Tag 全是合法英文键",
+                        pairs.Count == 7 && seenDisp.Count == 7 && tagsLegal,
+                        "项数=" + pairs.Count + " 去重显示=" + seenDisp.Count + " Tag合法=" + tagsLegal);
+
+                    // ③ 非法值：cmd / 空串 / 中文显示文本 一律拒绝，且条目类型原样不动
+                    probe.Type = ActionType.Send;
+                    string err = MenuEditorPage.ApplyActionTypeKey(probe, "cmd");
+                    ActionType dummy;
+                    Chk("⑳c 非法动作类型「cmd」被拒且不改类型",
+                        err.Length > 0 && probe.Type == ActionType.Send, err);
+                    Chk("⑳d 严格解析：cmd / 空串 / 中文显示文本 一律 false",
+                        !MenuEditorPage.TryParseActionTypeKey("cmd", out dummy)
+                        && !MenuEditorPage.TryParseActionTypeKey("", out dummy)
+                        && !MenuEditorPage.TryParseActionTypeKey("执行命令", out dummy), "");
+
+                    // ② 选中文项 → 保存：配置行必须是英文键
+                    var gL5 = page.T_Group() ?? (page.T_Groups().Count > 0 ? page.T_Groups()[0] : null);
+                    if (gL5 == null)
+                    {
+                        Chk("⑳e 选中中文项后保存：配置行不含中文", false, "★未执行：没有可选分组");
+                    }
+                    else
+                    {
+                        // 合成一条 **纯 ASCII** 条目：这样"整行不含中文"才是可判定的强断言
+                        var synth = new MItem
+                        {
+                            Title = "zz-l5-ascii",
+                            Target = "cmd.exe",
+                            Level = page.T_BaseLevel()
+                        };
+                        gL5.Items.Add(synth);
+                        page.T_Select(synth);          // 预览框跟着**选中项**走
+                        page.T_ShowFields(synth);
+                        bool picked = page.T_SelectTypeByDisplay("执行命令");
+                        string msgL5 = page.T_SaveConf();
+
+                        string expect = MenuConfWriter.FormatItem(synth);
+                        var lines = File.ReadAllText(tmpConf, Encoding.UTF8).Split('\n');
+                        bool hasLine = false;
+                        foreach (var ln in lines)
+                            if (ln.TrimEnd('\r') == expect) { hasLine = true; break; }
+
+                        Chk("⑳e 中文项「执行命令」⇒ 落盘为 action，整行无中文",
+                            picked && synth.Type == ActionType.Action
+                            && msgL5.StartsWith("OK") && hasLine
+                            && TypeToken(expect) == "action" && !IsCjk(expect),
+                            "行=" + expect);
+
+                        // 预览框必须仍是**原文法**（英文键 + ASCII 目标），汉化不越界
+                        string prev = page.T_PreviewText();
+                        Chk("⑳g 实时预览仍是原文法（无中文、类型段=action）",
+                            prev == expect && TypeToken(prev) == "action" && !IsCjk(prev),
+                            "预览=" + (prev ?? "null"));
+
+                        // 落盘的英文键必须能被解析器认回来（否则就是"静默失效"）
+                        var reparse = new ConfParser(tmpConf);
+                        reparse.Parse();
+                        bool diskOk = false;
+                        foreach (var gg in reparse.Groups)
+                            foreach (var ii in gg.Items)
+                                if (ii.Title == "zz-l5-ascii" && ii.Type == ActionType.Action) diskOk = true;
+                        Chk("⑳f 回读：磁盘上的 action 解析回 ActionType.Action", diskOk,
+                            diskOk ? "" : "配置文件=" + tmpConf);
+
+                        // 收尾：摘掉合成条目，沙箱回到进入本段前的状态
+                        gL5.Items.Remove(synth);
+                        page.T_SaveConf();
+                    }
+                }
+                catch (Exception exL5)
+                {
+                    Chk("⑳ L5 动作类型汉化", false, "异常：" + exL5.GetType().Name + ": " + exL5.Message);
+                }
+
+                // ============================================================
+                // ㉑ C1：保存前校验闸（非法结构**不许写盘**）
+                //   夹具三种：跳级 / 父条目后没紧跟子条目 / 同菜单内条目 ID 重复；
+                //   另外再压一条"原子写失败"（tmp 写成功、回读失败 ⇒ 原文件不变 + tmp 清理）。
+                //   判据一律是：返回 false + 明确错误码/文案 + **原文件 SHA256 不变**。
+                // ============================================================
+                try
+                {
+                    string gateRoot = Path.Combine(root, "state", "l6-gate");
+                    string gateConf = Path.Combine(gateRoot, "config", "menus.conf");
+                    Directory.CreateDirectory(Path.Combine(gateRoot, "config"));
+                    // 目录跨次运行会留痕（备份/tmp）⇒ 先清干净，"被拦时连备份都没生成"才可判
+                    foreach (var old in Directory.GetFiles(Path.GetDirectoryName(gateConf), "menus.conf.bak.*"))
+                        try { File.Delete(old); } catch { }
+                    try { if (File.Exists(gateConf + ".tmp")) File.Delete(gateConf + ".tmp"); } catch { }
+                    // 用**真实配置**做底：它必须自己先过闸（否则夹具就没有"合法基线"可言）
+                    File.Copy(srcConf, gateConf, true);
+
+                    var gw = new MenuConfWriter(gateConf);
+                    var pGate = new ConfParser(gateConf);
+                    pGate.Parse();
+                    string hash0 = Sha256(File.ReadAllBytes(gateConf));
+
+                    Chk("㉑a 现役 menus.conf 过闸：0 处结构问题",
+                        MenuConfWriter.Validate(pGate.Groups).Count == 0,
+                        Describe(MenuConfWriter.Validate(pGate.Groups)));
+
+                    // ---- 夹具① 跳级：子条目 Level 拨到"上一条 + 2" ----
+                    {
+                        var p = ParseAgain(gateConf);
+                        var g = FirstGroupWithChild(p.Groups);
+                        int idx = FirstChildIndex(g.Items);
+                        g.Items[idx].Level = g.Items[idx - 1].Level + 2;
+                        string m; List<MenuStructureIssue> iss;
+                        bool ok = gw.Save(p.Groups, out m, out iss);
+                        Chk("㉑b 跳级 ⇒ 拒绝写盘（返回 false + LEVEL_JUMP）",
+                            !ok && HasCode(iss, MenuStructureValidator.LevelJump),
+                            ok ? "竟然写成功了：" + m : Describe(iss));
+                        Chk("㉑c 跳级拒绝后原文件 SHA256 不变 + 连备份都没有（闸在任何写动作之前）",
+                            Sha256(File.ReadAllBytes(gateConf)) == hash0
+                            && Directory.GetFiles(Path.GetDirectoryName(gateConf), "menus.conf.bak.*").Length == 0
+                            && !File.Exists(gateConf + ".tmp"),
+                            "hash=" + hash0.Substring(0, 12)
+                            + " 备份数=" + Directory.GetFiles(Path.GetDirectoryName(gateConf), "menus.conf.bak.*").Length);
+                        // 行号必须真的对得上"将来会写出的那份文本"（不是拍脑袋的下标）
+                        string[] serLines = MenuConfWriter.Serialize(p.Groups)
+                            .Replace("\r\n", "\n").Split('\n');
+                        bool lineHit = iss.Count > 0 && iss[0].LineNo > 0
+                            && iss[0].LineNo <= serLines.Length
+                            && serLines[iss[0].LineNo - 1].IndexOf(iss[0].Item.Title, StringComparison.Ordinal) >= 0;
+                        Chk("㉑d 拒绝原因带「第 N 行 / 条目「X」：原因」且行号与序列化文本对得上",
+                            iss.Count > 0 && iss[0].Where.StartsWith("第 " + iss[0].LineNo + " 行 / 条目「")
+                            && iss[0].Where.IndexOf("：", StringComparison.Ordinal) > 0
+                            && lineHit,
+                            (iss.Count > 0 ? iss[0].Where : "<无问题列表>")
+                            + " ｜ 该行文本=" + (lineHit ? serLines[iss[0].LineNo - 1].Trim() : "<对不上>"));
+                    }
+
+                    // ---- 夹具② 父条目后没紧跟子条目（空壳子菜单）----
+                    {
+                        var p = ParseAgain(gateConf);
+                        var g = p.Groups[0];
+                        // 造一个 group 标题，后面没有任何子条目
+                        g.Items.Add(new MItem
+                        {
+                            Title = "zz-空壳父条目",
+                            Type = ActionType.Group,
+                            Level = g.Items.Count > 0 ? g.Items[0].Level : 1
+                        });
+                        string m; List<MenuStructureIssue> iss;
+                        bool ok = gw.Save(p.Groups, out m, out iss);
+                        Chk("㉑e 父条目后没紧跟子条目 ⇒ 拒绝写盘（PARENT_NO_CHILD）",
+                            !ok && HasCode(iss, MenuStructureValidator.ParentNoChild),
+                            ok ? "竟然写成功了：" + m : Describe(iss));
+                        Chk("㉑f 父后断子拒绝后原文件 SHA256 不变",
+                            Sha256(File.ReadAllBytes(gateConf)) == hash0, "");
+                    }
+
+                    // ---- 夹具③ 同一菜单内条目 ID 重复（两条完全一样的条目）----
+                    {
+                        var p = ParseAgain(gateConf);
+                        var g = p.Groups[0];
+                        int lv = g.Items.Count > 0 ? g.Items[0].Level : 1;
+                        var dupSrc = g.Items[0];
+                        g.Items.Add(new MItem
+                        {
+                            Title = dupSrc.Title,
+                            Hotkey = dupSrc.Hotkey,
+                            Type = dupSrc.Type,
+                            Flag = dupSrc.Flag,
+                            Target = dupSrc.Target,
+                            Level = lv
+                        });
+                        string m; List<MenuStructureIssue> iss;
+                        bool ok = gw.Save(p.Groups, out m, out iss);
+                        Chk("㉑g 同菜单内条目 ID 重复 ⇒ 拒绝写盘（DUPLICATE_ID）",
+                            !ok && HasCode(iss, MenuStructureValidator.DuplicateId),
+                            ok ? "竟然写成功了：" + m : Describe(iss));
+                        Chk("㉑h 重复 ID 拒绝后原文件 SHA256 不变",
+                            Sha256(File.ReadAllBytes(gateConf)) == hash0, "");
+                    }
+
+                    // ---- 夹具④ 原子写失败模拟：结构合法但写出去读不回来 ----
+                    //   标题里带 `|` ⇒ 序列化后那个 `|` 会被解析器当"标题/动作分隔符"，
+                    //   回读出来的标题就变了 ⇒ 必须**删 tmp、保留原文件**、报错，而不是覆盖。
+                    {
+                        var p = ParseAgain(gateConf);
+                        p.Groups[0].Items.Add(new MItem
+                        {
+                            Title = "zz-带竖线的标题|后半截",
+                            Type = ActionType.Run,
+                            Target = "x.exe",
+                            Level = p.Groups[0].Items.Count > 0 ? p.Groups[0].Items[0].Level : 1
+                        });
+                        string m; List<MenuStructureIssue> iss;
+                        bool ok = gw.Save(p.Groups, out m, out iss);
+                        Chk("㉑i 回读校验失败 ⇒ 取消保存（原文件不动）",
+                            !ok && m.IndexOf("已取消保存", StringComparison.Ordinal) >= 0,
+                            ok ? "竟然写成功了：" + m : m.Replace("\n", "  |  "));
+                        Chk("㉑j 回读失败后 tmp 被清理 + 原文件 SHA256 不变",
+                            !File.Exists(gateConf + ".tmp")
+                            && Sha256(File.ReadAllBytes(gateConf)) == hash0,
+                            "tmp存在=" + File.Exists(gateConf + ".tmp"));
+                    }
+
+                    // ---- ⑤ 修好之后必须还能存（闸不是单向陷阱）----
+                    {
+                        var p = ParseAgain(gateConf);
+                        string m;
+                        bool ok = gw.Save(p.Groups, out m);
+                        Chk("㉑k 合法结构（修复后）仍能正常保存", ok, m.Replace("\n", "  |  "));
+                    }
+
+                    // ---- ⑥ 页面路径：状态行 + 弹窗内容 + 双击跳转 ----
+                    {
+                        var g = page.T_Group() ?? page.T_Groups()[0];
+                        // 挑一条**叶子**（没有子条目）来拨层级 ⇒ 只会触发"跳级"，不牵连父子规则
+                        var victim = g.Items[0];
+                        int vi = 0;
+                        for (int i = 1; i < g.Items.Count; i++)
+                        {
+                            if (i + 1 >= g.Items.Count || g.Items[i + 1].Level <= g.Items[i].Level)
+                            {
+                                victim = g.Items[i];
+                                vi = i;
+                                break;
+                            }
+                        }
+                        int goodLevel = victim.Level;
+                        victim.Level = (vi > 0 ? g.Items[vi - 1].Level : goodLevel) + 3;    // 跳级
+                        byte[] beforeBytes = File.ReadAllBytes(tmpConf);
+
+                        string st = page.T_OnSave();
+                        Chk("㉑l 页面保存被结构校验拦下（状态行含「结构校验没通过」）",
+                            st.IndexOf("结构校验没通过", StringComparison.Ordinal) >= 0,
+                            st);
+                        Chk("㉑m 页面被拦后 menus.conf 一字节没动",
+                            BytesEqual(beforeBytes, File.ReadAllBytes(tmpConf)), "");
+
+                        var issues = page.T_Validate();
+                        string probe = MenuEditorPage.T_DialogProbe(issues);
+                        bool rowsOk = issues.Count > 0;
+                        foreach (var x in issues)
+                            if (x.Where.IndexOf("行 / 条目「", StringComparison.Ordinal) < 0) rowsOk = false;
+                        Chk("㉑n 验证窗逐条列「第 N 行 / 条目 X：原因」",
+                            rowsOk && probe.IndexOf("行 / 条目「", StringComparison.Ordinal) >= 0,
+                            probe);
+                        Chk("㉑o 验证窗按钮 = 继续编辑 / 放弃修改",
+                            probe.IndexOf("按钮=[继续编辑/放弃修改]", StringComparison.Ordinal) >= 0,
+                            probe);
+
+                        // 双击（同一个方法）⇒ 选中该条目
+                        MenuStructureIssue jumpTarget = null;
+                        foreach (var x in issues) if (x.Item != null) { jumpTarget = x; break; }
+                        Chk("㉑p 双击某行 ⇒ 跳到该条目（选中它）",
+                            jumpTarget != null && page.T_JumpToIssue(jumpTarget),
+                            jumpTarget == null ? "问题列表里没有可跳转的条目" : jumpTarget.Where);
+
+                        // 还原 ⇒ 保存必须恢复成功
+                        victim.Level = goodLevel;
+                        string okMsg = page.T_SaveConf();
+                        Chk("㉑q 还原后保存成功（闸只拦非法结构）+ 成功路径不留 .tmp",
+                            okMsg.StartsWith("OK") && !File.Exists(tmpConf + ".tmp"), okMsg);
+                    }
+                }
+                catch (Exception exC1)
+                {
+                    Chk("㉑ C1 保存前校验闸", false, "异常：" + exC1.GetType().Name + ": " + exC1.Message);
+                }
+
+                // ============================================================
+                // ㉒ C2：条目跨分组移动 / 复制
+                //   独立沙箱 state\l7-crossgroup（不动上面那台 page 的状态）。
+                //   ① 带 3 层子树的条目搬到另一分组：子树完整 + Level 重算 + 源分组彻底消失
+                //   ② 复制到分组：新条目 ID 唯一 + 内容一致 + 原条目不变
+                //   ③ 多选 N 条一起搬（走右键菜单 → 选目标 → 搬）：两分组条目总数守恒
+                //   ④ 保存往返仍逐字节幂等
+                //   ⑤ 反向：搬完会让父条目变空壳 ⇒ C1 闸拒绝 + 整体回滚（不写盘）
+                // ============================================================
+                try
+                {
+                    string l7Root = Path.Combine(root, "state", "l7-crossgroup");
+                    string l7Conf = Path.Combine(l7Root, "config", "menus.conf");
+                    Directory.CreateDirectory(Path.Combine(l7Root, "config"));
+                    Directory.CreateDirectory(Path.Combine(l7Root, "cache"));
+                    // 目录跨次运行会留痕（备份 / tmp）⇒ 先清干净，沙箱每轮从同一基线开始
+                    foreach (var old in Directory.GetFiles(Path.GetDirectoryName(l7Conf), "menus.conf.bak.*"))
+                        try { File.Delete(old); } catch { }
+                    try { if (File.Exists(l7Conf + ".tmp")) File.Delete(l7Conf + ".tmp"); } catch { }
+                    File.Copy(srcConf, l7Conf, true);
+
+                    var p2 = new MenuEditorPage(l7Root);
+
+                    int giTool = GroupIndexByName(p2, "通用菜单");
+                    int giDef = GroupIndexByName(p2, "默认菜单");
+                    int giText = GroupIndexByName(p2, "文本");
+                    int giZip = GroupIndexByName(p2, "压缩包");
+
+                    if (giTool < 0 || giDef < 0 || giText < 0 || giZip < 0)
+                    {
+                        Chk("㉒a 跨分组场景所需分组齐全（通用菜单/默认菜单/文本/压缩包）", false,
+                            "下标=" + giTool + "," + giDef + "," + giText + "," + giZip);
+                    }
+                    else
+                    {
+                        // ---- 右键菜单：两项齐全，且紧跟在「复制条目」之后 ----
+                        var hs = p2.T_MenuHeaders();
+                        int ixDup = hs.IndexOf("复制条目");
+                        int ixMove = hs.IndexOf("移动到分组…");
+                        int ixCopy = hs.IndexOf("复制到分组…");
+                        Chk("㉒a 右键菜单含「移动到分组…」「复制到分组…」（相邻，排在「复制条目」之后）",
+                            ixDup >= 0 && ixMove == ixDup + 1 && ixCopy == ixMove + 1,
+                            string.Join(" / ", hs.ToArray()));
+
+                        // ---- 目标选择窗：候选 = 除当前分组外的全部分组，按钮 = 移动/复制 + 取消 ----
+                        p2.T_SelectGroup(giTool);
+                        var cands = p2.T_PickerGroupNames();
+                        Chk("㉒b 目标选择窗排除当前分组、含其余全部分组",
+                            cands.Count == p2.T_Groups().Count - 1
+                            && !cands.Contains("通用菜单") && cands.Contains("默认菜单"),
+                            "候选=" + cands.Count + "/" + (p2.T_Groups().Count - 1));
+                        string probeMove = p2.T_PickerProbe(false);
+                        string probeCopy = p2.T_PickerProbe(true);
+                        Chk("㉒c 选择窗文案/按钮对得上（移动=整棵子树，复制=新条目）",
+                            probeMove.IndexOf("移动到分组", StringComparison.Ordinal) >= 0
+                            && probeMove.IndexOf("按钮=[移动/取消]", StringComparison.Ordinal) >= 0
+                            && probeCopy.IndexOf("复制到分组", StringComparison.Ordinal) >= 0
+                            && probeCopy.IndexOf("按钮=[复制/取消]", StringComparison.Ordinal) >= 0
+                            && probeCopy.IndexOf("新条目", StringComparison.Ordinal) >= 0,
+                            probeMove);
+
+                        // ---- 造一棵 3 层子树：工具(lv1) → PowerShell(lv2, 改成 group) → zz-l7-l3-leaf(lv3) ----
+                        var toolNode = FindNodeByTitleDeep(p2.T_Roots(), "工具");
+                        var psNode = toolNode == null ? null : FindNodeByTitleDeep(toolNode.Children, "PowerShell");
+                        MItem leaf = null;
+                        if (toolNode == null || psNode == null)
+                        {
+                            Chk("㉒d 构造 3 层子树（样例缺「工具 / PowerShell」）", false, "样例不足，不算通过");
+                        }
+                        else
+                        {
+                            // 中间层必须真是 group（否则"非 group 有子项"会被 C1 拒，构造不出来）
+                            psNode.Item.Type = ActionType.Group;
+                            psNode.Item.Target = "";
+                            psNode.Item.Flag = ActionFlag.None;
+                            p2.T_Select(psNode.Item);
+                            p2.T_AddItem();
+                            leaf = p2.T_Selected();
+                            leaf.Title = "zz-l7-l3-leaf";
+
+                            Chk("㉒d 3 层子树就位（lv1/lv2/lv3）",
+                                leaf != null
+                                && toolNode.Item.Level + 2 == leaf.Level
+                                && psNode.Item.Level == toolNode.Item.Level + 1,
+                                "工具 lv" + toolNode.Item.Level + " / PowerShell lv" + psNode.Item.Level
+                                + " / 叶子 lv" + (leaf == null ? "?" : leaf.Level.ToString()));
+                        }
+
+                        if (toolNode != null && psNode != null && leaf != null)
+                        {
+                            int srcBase = p2.T_GroupBaseLevel(giTool);
+                            int dstBase = p2.T_GroupBaseLevel(giDef);
+
+                            // ============ ⑤ 反向：搬走唯一子项 ⇒ 父条目变空壳 ⇒ C1 闸拒绝 ============
+                            var srcSnap = new List<MItem>(p2.T_Groups()[giTool].Items);
+                            int dstCount0 = p2.T_GroupItemCount(giDef);
+                            p2.T_Select(leaf);
+                            string rj = p2.T_MoveSelectionToGroup(giDef, false);
+                            Chk("㉒e 会把父条目搬成空壳 ⇒ 被 C1 闸拒绝（PARENT_NO_CHILD 文案）",
+                                rj.StartsWith("REJECT", StringComparison.Ordinal)
+                                && rj.IndexOf("空子菜单", StringComparison.Ordinal) >= 0,
+                                rj);
+                            Chk("㉒f 拒绝后两个分组整体回滚（引用集合 / Level / 目标分组条目数全不变）",
+                                SameLevels(srcSnap, p2.T_Groups()[giTool].Items)
+                                && p2.T_GroupItemCount(giDef) == dstCount0
+                                && leaf.Level == toolNode.Item.Level + 2
+                                && p2.T_Find(leaf) != null
+                                && MenuConfWriter.Validate(p2.T_Groups()).Count == 0,
+                                "源=" + p2.T_GroupItemCount(giTool) + " 目标=" + p2.T_GroupItemCount(giDef));
+
+                            // ============ ① 整棵 3 层子树移动到另一分组 ============
+                            // 「工具」下不止 PowerShell（还有 Node.js / curl / ffmpeg）⇒
+                            // 用 DFS 块当期望值，别硬编码条数（否则样例一变就假绿/假红）。
+                            var toolFresh = p2.T_Find(toolNode.Item);
+                            var subItems = new List<MItem>();
+                            var subDepths = new List<int>();
+                            FlatBlock(toolFresh, 0, subItems, subDepths);
+                            int subCount = subItems.Count;
+
+                            int srcCount0 = p2.T_GroupItemCount(giTool);
+                            int dstCount1 = p2.T_GroupItemCount(giDef);
+                            p2.T_Select(toolNode.Item);
+                            string mv = p2.T_MoveSelectionToGroup(giDef, false);
+
+                            var srcNow = p2.T_Groups()[giTool].Items;
+                            var dstNow = p2.T_Groups()[giDef].Items;
+
+                            Chk("㉒g 移动整棵子树返回 OK", mv.StartsWith("OK", StringComparison.Ordinal), mv);
+                            Chk("㉒h 源分组少了整棵子树、目标分组多了整棵子树（同一数量）",
+                                subCount >= 3
+                                && srcNow.Count == srcCount0 - subCount
+                                && dstNow.Count == dstCount1 + subCount,
+                                "子树=" + subCount + " 条 / 源 " + srcCount0 + "→" + srcNow.Count
+                                + " / 目标 " + dstCount1 + "→" + dstNow.Count);
+                            bool anyLeft = false;
+                            foreach (var x in subItems) if (srcNow.Contains(x)) anyLeft = true;
+                            Chk("㉒i 源分组里该子树彻底消失（父 / 中间层 / 叶子 / 其余子项都不在）",
+                                !anyLeft, "源分组还残留 " + srcNow.Count + " 条");
+
+                            string wfDef;
+                            bool wellDef = p2.T_WellFormedGroup(giDef, out wfDef);
+                            bool tailOk = dstNow.Count >= subCount;
+                            for (int k = 0; k < subCount && tailOk; k++)
+                            {
+                                var got = dstNow[dstNow.Count - subCount + k];
+                                if (!ReferenceEquals(got, subItems[k]) || got.Level != dstBase + subDepths[k])
+                                    tailOk = false;
+                            }
+                            Chk("㉒j 目标分组里子树完整（DFS 顺序不变）+ Level 重算（相对深度 + 目标基准）",
+                                tailOk && wellDef,
+                                "目标基准 lv" + dstBase + " ⇒ 工具 lv" + toolNode.Item.Level
+                                + " / PowerShell lv" + psNode.Item.Level + " / 叶子 lv" + leaf.Level
+                                + "（子树 " + subCount + " 条）" + wfDef);
+
+                            // 目标分组的树里父子链必须真的挂上（不只是 Level 数字对）
+                            p2.T_SelectGroup(giDef);
+                            var t2 = p2.T_Find(toolNode.Item);
+                            var n2 = p2.T_Find(psNode.Item);
+                            var l2 = p2.T_Find(leaf);
+                            Chk("㉒k 目标分组的树里父子链完整（工具 → PowerShell → 叶子）",
+                                t2 != null && n2 != null && l2 != null
+                                && ReferenceEquals(n2.Parent, t2) && ReferenceEquals(l2.Parent, n2),
+                                t2 == null || n2 == null || l2 == null ? "有节点没进视图" : "");
+
+                            // 落盘验证：保存后重新解析，源分组没有「工具」、目标分组是完整三层
+                            string m1 = p2.T_SaveConf();
+                            var disk = new ConfParser(l7Conf);
+                            disk.Parse();
+                            MenuGroup dSrc = null, dDst = null;
+                            foreach (var g in disk.Groups)
+                            {
+                                if (g.Name == "通用菜单") dSrc = g;
+                                if (g.Name == "默认菜单") dDst = g;
+                            }
+                            bool gone = dSrc != null && !ContainsTitle(dSrc.Items, "工具");
+                            bool there = dDst != null && HasTitlesInOrder(dDst.Items,
+                                new[] { "工具", "PowerShell", "zz-l7-l3-leaf" },
+                                new[] { dstBase, dstBase + 1, dstBase + 2 });
+                            Chk("㉒l 落盘：源分组没有「工具」、目标分组有完整三层（Level 已重算）",
+                                m1.StartsWith("OK", StringComparison.Ordinal) && gone && there,
+                                m1 + " | 源有工具=" + !gone + " 目标三层=" + there);
+
+                            // ============ ② 复制到分组：新对象 + 内容一致 + 原条目不变 ============
+                            p2.T_SelectGroup(giDef);
+                            var copySnap = new List<MItem>(p2.T_Groups()[giDef].Items);
+                            int textCount0 = p2.T_GroupItemCount(giText);
+
+                            p2.T_Select(toolNode.Item);
+                            string cp = p2.T_MoveSelectionToGroup(giText, true);
+                            var textNow = p2.T_Groups()[giText].Items;
+
+                            bool noShared = true;
+                            foreach (var x in textNow) if (subItems.Contains(x)) noShared = false;
+
+                            bool sameContent = textNow.Count >= subCount;
+                            for (int k = 0; k < subCount && sameContent; k++)
+                            {
+                                var got = textNow[textNow.Count - subCount + k];
+                                var exp = subItems[k];
+                                if (got.Title != exp.Title || got.Hotkey != exp.Hotkey
+                                    || got.Type != exp.Type || got.Flag != exp.Flag
+                                    || (got.Target ?? "") != (exp.Target ?? ""))
+                                    sameContent = false;
+                            }
+
+                            Chk("㉒m 复制 OK 且目标分组多了整棵子树（" + subCount + " 条）",
+                                cp.StartsWith("OK", StringComparison.Ordinal)
+                                && textNow.Count == textCount0 + subCount, cp);
+                            Chk("㉒n 复制件是**新对象**（不与原条目共用引用）且内容逐条一致",
+                                noShared && sameContent
+                                && textNow[textNow.Count - subCount].Title == "工具"
+                                && textNow[textNow.Count - subCount + 1].Title == "PowerShell"
+                                && textNow[textNow.Count - subCount + 2].Title == "zz-l7-l3-leaf",
+                                "共用引用=" + !noShared + " 内容一致=" + sameContent);
+                            Chk("㉒o 复制后目标分组内**身份键全唯一**（ID 唯一断言）",
+                                AllIdentityUnique(textNow),
+                                "条目数=" + textNow.Count);
+                            Chk("㉒p 复制后源分组原条目一条没动（引用 / 顺序 / Level 全同）",
+                                SameLevels(copySnap, p2.T_Groups()[giDef].Items),
+                                "源 " + copySnap.Count + "→" + p2.T_Groups()[giDef].Items.Count);
+
+                            // ============ ③ 多选 2 条 → 右键「移动到分组…」→ 一起搬 ============
+                            p2.T_SelectGroup(giText);
+                            var txt = p2.T_Groups()[giText].Items;
+                            var ma = txt[0];          // 记事本
+                            var mb = txt[1];          // VS Code
+                            int textCount1 = txt.Count;
+                            int zipCount0 = p2.T_GroupItemCount(giZip);
+                            int totalBefore = TotalItems(p2.T_Groups());
+
+                            p2.T_ClickNode(ma, ModifierKeys.None);
+                            p2.T_ClickNode(mb, ModifierKeys.Control);
+                            Chk("㉒q Ctrl 多选命中 2 条",
+                                p2.T_MarkedCount() == 2 && p2.T_Marked().Contains(ma)
+                                && p2.T_Marked().Contains(mb),
+                                "marked=" + p2.T_MarkedCount());
+
+                            p2.T_SetGroupPicker(delegate(bool copy) { return giZip; });
+                            bool clicked = p2.T_ClickMenu("移动到分组…");
+                            p2.T_SetGroupPicker(null);      // 还原真实弹窗（后续没人再用替身）
+
+                            Chk("㉒r 右键「移动到分组…」→ 2 条一起搬（走菜单 → 选目标 → 搬同一条链路）",
+                                clicked
+                                && p2.T_GroupItemCount(giZip) == zipCount0 + 2
+                                && txt.Count == textCount1 - 2
+                                && TotalItems(p2.T_Groups()) == totalBefore,
+                                "点击=" + clicked + " 压缩包 " + zipCount0 + "→" + p2.T_GroupItemCount(giZip)
+                                + " 文本 " + textCount1 + "→" + txt.Count
+                                + " 总数 " + totalBefore + "→" + TotalItems(p2.T_Groups()));
+
+                            // Shift 连选（同一个 HandleNodeClick）：锚点 → 目标整段
+                            p2.T_SelectGroup(giDef);
+                            var droots = p2.T_Roots();
+                            if (droots.Count >= 3)
+                            {
+                                p2.T_ClickNode(droots[0].Item, ModifierKeys.None);
+                                p2.T_ClickNode(droots[2].Item, ModifierKeys.Shift);
+                                Chk("㉒s Shift 连选 = 锚点到目标区间（3 条）",
+                                    p2.T_MarkedCount() == 3, "marked=" + p2.T_MarkedCount());
+                            }
+                            else
+                            {
+                                Chk("㉒s Shift 连选 = 锚点到目标区间（3 条）", false,
+                                    "★未执行：根节点不足 3 个（样例不足，不算通过）");
+                            }
+                            if (droots.Count > 0) p2.T_Select(droots[0].Item);
+
+                            // ============ ④ 保存往返仍逐字节幂等 ============
+                            string m2 = p2.T_SaveConf();
+                            byte[] b1 = File.ReadAllBytes(l7Conf);
+                            p2.T_SaveConf();
+                            byte[] b2 = File.ReadAllBytes(l7Conf);
+                            Chk("㉒t 保存成功 + 连存两次逐字节一致（幂等）",
+                                m2.StartsWith("OK", StringComparison.Ordinal) && BytesEqual(b1, b2),
+                                m2 + " | " + b1.Length + "B / " + b2.Length + "B");
+                            Chk("㉒u 保存后磁盘与内存模型逐条一致",
+                                ModelEqualsFile(p2, l7Conf, out string whyL7), whyL7);
+
+                            // 真实配置全程未被触碰（C2 的沙箱纪律）
+                            Chk("㉒v 真实 menus.conf 未被 C2 用例写（沙箱隔离）",
+                                BytesEqual(File.ReadAllBytes(srcConf), File.ReadAllBytes(srcConf)), "");
+                        }
+                    }
+                }
+                catch (Exception exC2)
+                {
+                    Chk("㉒ C2 跨分组移动/复制", false, "异常：" + exC2.GetType().Name + ": " + exC2.Message);
+                }
             }
             catch (Exception ex)
             {
@@ -547,6 +1155,180 @@ namespace RunEverCs
             if (a.Length != b.Length) return false;
             for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
             return true;
+        }
+
+        /// <summary>SHA256（十六进制大写）—— 判"原文件一字节没动"用。</summary>
+        private static string Sha256(byte[] data)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                byte[] h = sha.ComputeHash(data);
+                var sb = new StringBuilder(h.Length * 2);
+                foreach (byte x in h) sb.Append(x.ToString("X2"));
+                return sb.ToString();
+            }
+        }
+
+        /// <summary>重新从磁盘解析一份**独立模型**（夹具要改结构，不能污染页面那份）。</summary>
+        private static ConfParser ParseAgain(string conf)
+        {
+            var p = new ConfParser(conf);
+            p.Parse();
+            return p;
+        }
+
+        /// <summary>第一个**真有层级**的分组（不跳级夹具需要一个"上一条比它浅"的位置）。</summary>
+        private static MenuGroup FirstGroupWithChild(List<MenuGroup> groups)
+        {
+            foreach (var g in groups)
+                if (g != null && HasChild(g.Items)) return g;
+            return (groups != null && groups.Count > 0) ? groups[0] : null;
+        }
+
+        /// <summary>第一条"比前一条更深"的条目下标（= 第一个子条目）。找不到 ⇒ 1（安全兜底）。</summary>
+        private static int FirstChildIndex(List<MItem> items)
+        {
+            for (int i = 1; i < items.Count; i++)
+                if (items[i].Level > items[i - 1].Level) return i;
+            return items.Count > 1 ? 1 : 0;
+        }
+
+        private static bool HasCode(List<MenuStructureIssue> issues, string code)
+        {
+            if (issues == null) return false;
+            foreach (var x in issues) if (x.Code == code) return true;
+            return false;
+        }
+
+        private static string Describe(List<MenuStructureIssue> issues)
+        {
+            if (issues == null || issues.Count == 0) return "0 处";
+            var parts = new List<string>();
+            foreach (var x in issues) parts.Add("[" + x.Code + "] " + x.Where);
+            return string.Join("  ‖  ", parts.ToArray());
+        }
+
+        /// <summary>该串里是否含中日韩统一表意文字（用于断言"落盘不含中文"）。</summary>
+        private static bool IsCjk(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return false;
+            foreach (char c in s)
+                if (c >= '\u4E00' && c <= '\u9FFF') return true;
+            return false;
+        }
+
+        // ============================================================
+        // ★ C2 辅助：跨分组移动 / 复制用例
+        // ============================================================
+
+        /// <summary>按分组名找 `_groups` 下标（找不到 ⇒ -1）。</summary>
+        private static int GroupIndexByName(MenuEditorPage page, string name)
+        {
+            var gs = page.T_Groups();
+            for (int i = 0; i < gs.Count; i++)
+                if (gs[i] != null && (gs[i].Name ?? "").Trim() == name) return i;
+            return -1;
+        }
+
+        /// <summary>在树里按标题深度优先找节点（标题完全相等）。</summary>
+        private static MenuEditorPage.NodeRow FindNodeByTitleDeep(
+            IEnumerable<MenuEditorPage.NodeRow> nodes, string title)
+        {
+            foreach (var n in nodes)
+            {
+                if (n.Item != null && n.Item.Title == title) return n;
+                var r = FindNodeByTitleDeep(n.Children, title);
+                if (r != null) return r;
+            }
+            return null;
+        }
+
+        /// <summary>把一棵子树压成 DFS 顺序的（条目, 相对深度）—— 与产品侧搬动块同口径。</summary>
+        private static void FlatBlock(MenuEditorPage.NodeRow n, int depth,
+            List<MItem> items, List<int> depths)
+        {
+            if (n == null) return;
+            items.Add(n.Item);
+            depths.Add(depth);
+            foreach (var c in n.Children) FlatBlock(c, depth + 1, items, depths);
+        }
+
+        /// <summary>扁平条目里是否有该标题。</summary>
+        private static bool ContainsTitle(List<MItem> items, string title)
+        {
+            foreach (var it in items) if (it != null && it.Title == title) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 扁平条目里是否**按顺序**出现这几条标题，且 Level 与期望一一对应
+        /// （判"搬迁后子树完整 + Level 重算"用）。
+        /// </summary>
+        private static bool HasTitlesInOrder(List<MItem> items, string[] titles, int[] levels)
+        {
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (items[i] == null || items[i].Title != titles[0]) continue;
+                if (i + titles.Length > items.Count) continue;
+                bool ok = true;
+                for (int k = 0; k < titles.Length; k++)
+                {
+                    if (items[i + k].Title != titles[k] || items[i + k].Level != levels[k]) { ok = false; break; }
+                }
+                if (ok) return true;
+            }
+            return false;
+        }
+
+        /// <summary>两条扁平列表**逐位**同引用 + 同 Level（判"操作没动源分组"用）。</summary>
+        private static bool SameLevels(List<MItem> a, List<MItem> b)
+        {
+            if (a.Count != b.Count) return false;
+            for (int i = 0; i < a.Count; i++)
+                if (!ReferenceEquals(a[i], b[i]) || a[i].Level != b[i].Level) return false;
+            return true;
+        }
+
+        /// <summary>全分组条目总数（判"两分组搬运守恒"用）。</summary>
+        private static int TotalItems(List<MenuGroup> groups)
+        {
+            int n = 0;
+            foreach (var g in groups)
+                if (g != null && g.Items != null) n += g.Items.Count;
+            return n;
+        }
+
+        /// <summary>同一菜单内「条目身份键」是否全唯一（= MenuSelfTest 的 ID 唯一口径）。</summary>
+        private static bool AllIdentityUnique(List<MItem> items)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var it in items)
+                if (it != null && !seen.Add(IdentityOf(it))) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// 条目身份键（与 `MenuStructureValidator.IdentityKey` **同口径**）：
+        /// 标题 + 快捷键(小写) + 动作类型 + flag + 目标。
+        /// </summary>
+        private static string IdentityOf(MItem it)
+        {
+            return (it.Title ?? "").Trim()
+                + "\u0001" + ((it.Hotkey ?? "").Trim().ToLowerInvariant())
+                + "\u0001" + (int)it.Type
+                + "\u0001" + (int)it.Flag
+                + "\u0001" + (it.Target ?? "").Trim();
+        }
+
+        /// <summary>一行菜单文法里「动作类型」那一段（`|` 之后第一个 token）；无 `|` ⇒ ""。</summary>
+        private static string TypeToken(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return "";
+            int bar = line.IndexOf('|');
+            if (bar < 0) return "";
+            var rest = line.Substring(bar + 1).Trim();
+            int sp = rest.IndexOf(' ');
+            return sp < 0 ? rest : rest.Substring(0, sp);
         }
 
         /// <summary>内存模型（分组/条目/Level）与磁盘文件解析结果逐条比对。</summary>

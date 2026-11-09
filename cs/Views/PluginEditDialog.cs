@@ -187,17 +187,22 @@ namespace RunEverCs.Views
             sp.Children.Add(_icon);
 
             // ---- 预览 ----
-            sp.Children.Add(Lbl("元数据预览（保存后写入插件文件）"));
+            sp.Children.Add(Lbl("元数据预览（保存后写入插件文件；与「配置块」面板同源）"));
             _preview = new TextBox
             {
                 IsReadOnly = true,
-                Height = 130,
-                FontFamily = new FontFamily("Consolas"),
+                Height = 165,
+                FontFamily = new FontFamily("Consolas, Microsoft YaHei"),
                 FontSize = 11.5,
                 AcceptsReturn = true,
                 TextWrapping = TextWrapping.NoWrap,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Background = new SolidColorBrush(Color.FromRgb(250, 250, 250))
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Padding = new Thickness(8),
+                // ★ 只读代码块外观（用户 2026-11-09 要求）：无边框 + 等宽 + 淡底；
+                //   只读但保留可选中复制（IsReadOnly 不影响选择）。
+                BorderThickness = new Thickness(0),
+                Background = new SolidColorBrush(Color.FromRgb(0xF6, 0xF6, 0xF6))
             };
             sp.Children.Add(_preview);
 
@@ -283,22 +288,34 @@ namespace RunEverCs.Views
                     : "形态 B（逻辑型）：脚本体里有自定义逻辑，请用「编辑源码」修改。");
         }
 
+        /// <summary>
+        /// 元数据预览 —— ★ 与「配置块」面板共用 `PluginScanner.FormatMetaText`：
+        /// 对话框里看到的、复制出去的、导入后再生成的都是同一份规范文本
+        /// （不再另写第二套拼接代码，避免格式漂移）。
+        /// </summary>
         private void UpdatePreview()
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("global RVE_FN_Name  := \"" + _name.Text + "\"");
-            sb.AppendLine("global RVE_FN_Match := \"" + _match.Text + "\"");
-            sb.AppendLine("global RVE_FN_Whole := " + (_whole.IsChecked == true ? "true" : "false"));
-            sb.AppendLine("global RVE_FN_Prio  := " + _prio.Text);
-            sb.AppendLine("global RVE_FN_Out   := \"" + (_out.SelectedItem ?? "") + "\"");
-            if (_tplPanel.Visibility == Visibility.Visible)
-                sb.AppendLine("global RVE_FN_Tpl   := \"" + _tpl.Text + "\"");
-            if (!string.IsNullOrWhiteSpace(_icon.Text))
-                sb.AppendLine("global RVE_FN_Icon  := \"" + _icon.Text + "\"");
-            sb.AppendLine("global RVE_FN_Show  := " + (_show.IsChecked == true ? "true" : "false"));
-            if (!_enabled.IsChecked == true)
-                sb.AppendLine("global RVE_FN_Enabled := false");
-            _preview.Text = sb.ToString();
+            var p = new PluginInfo
+            {
+                Name = _name.Text,
+                Match = _match.Text,
+                Whole = _whole.IsChecked == true,
+                Prio = ParsePrio(_prio.Text),
+                Out = (_out.SelectedItem ?? "").ToString(),
+                // 与保存一致：只有 Out=url 时才用 Tpl（其他类型面板隐藏、不写）
+                Tpl = (_tplPanel.Visibility == Visibility.Visible) ? _tpl.Text : "",
+                Icon = _icon.Text.Trim(),
+                // 选框只有 true/false；未声明 Show 的插件呈"未勾"⇒ 预览 false（与原行为一致）
+                Show = _show.IsChecked == true ? 1 : 0,
+                Enabled = _enabled.IsChecked == true
+            };
+            _preview.Text = PluginScanner.FormatMetaText(p);
+        }
+
+        private static int ParsePrio(string s)
+        {
+            int pr;
+            return int.TryParse((s ?? "").Trim(), out pr) ? pr : 100;
         }
 
         // ============================================================

@@ -157,7 +157,8 @@ Capture() {
     if (g_clipFilesFrom != "") {
         ; ★ 测试缝：直接读列表文件（生产路径不触发，见文件头说明）
         vFiles := ReadListFile(g_clipFilesFrom)
-        return BuildJson(vText, vFiles, vTitle, vClass, vProc, vClip)
+        vOut := BuildJson(vText, vFiles, vTitle, vClass, vProc, vClip)
+        return vOut
     }
 
     vSavedAll := ""
@@ -190,7 +191,8 @@ Capture() {
     if (vSavedAll != "")
         try A_Clipboard := vSavedAll
 
-    return BuildJson(vText, vFiles, vTitle, vClass, vProc, vClip)
+    vOut := BuildJson(vText, vFiles, vTitle, vClass, vProc, vClip)
+    return vOut
 }
 
 ; ---- 取剪贴板中的文件列表 ----
@@ -332,7 +334,38 @@ BuildJson(text, files, title, cls, proc, clip) {
 }
 
 HasFolder(files) {
+    ; ★ 2026-11-08 远程路径优化（实测依据：FileExist 等价 Test-Path）
+    ;     本地 0.4ms / UNC 活地址 16–59ms / UNC 死地址 26.6 **秒**
+    ;   原实现对每个选中文件都做一次 FileExist ⇒ 多选时 N 次网络往返；
+    ;   共享掉线或走 VPN 时热键按下后几十秒不出菜单。
+    ;   现在：① 同目录最多探 probeLimit 次（多选基本同目录）
+    ;         ② UNC 默认**不探**（auto.conf 的 remoteStat=probe 可恢复）
+    global g_capRemoteSkipped, g_capProbed
+    g_capRemoteSkipped := 0
+    g_capProbed := 0
+    if (!IsObject(files) || files.Length = 0)
+        return false
+
+    vRemote := StrLower(Trim(ReadAutoConfValue("remoteStat")))
+    vProbeRemote := (vRemote = "probe")
+
+    vSeen := Map()
     for f in files {
+        if (f = "")
+            continue
+        vIsRemote := (SubStr(f, 1, 2) = "\\")
+        if (vIsRemote && !vProbeRemote) {
+            g_capRemoteSkipped += 1
+            continue
+        }
+        SplitPath(f, , &vDir)
+        vKey := StrLower(RTrim(vDir, "\"))
+        vLimit := vIsRemote ? 1 : 8      ; 本地便宜，多探几次保住"混合选择"的正确性
+        vN := vSeen.Has(vKey) ? vSeen[vKey] : 0
+        if (vN >= vLimit)
+            continue
+        vSeen[vKey] := vN + 1
+        g_capProbed += 1
         try {
             if InStr(FileExist(f), "D")
                 return true
@@ -340,6 +373,42 @@ HasFolder(files) {
     }
     return false
 }
+
+; ---- 从 auto.conf 读一个键（读不到返回空串；绝不抛）----
+ReadAutoConfValue(key) {
+    try {
+        vConf := RootFromOutFile() "\auto.conf"
+        if (!FileExist(vConf))
+            return ""
+        for vLine in StrSplit(FileRead(vConf, "UTF-8"), "`n") {
+            vLine := Trim(vLine, " `t`r")
+            if (vLine = "" || SubStr(vLine, 1, 1) = "#" || SubStr(vLine, 1, 1) = ";")
+                continue
+            vPos := InStr(vLine, "=")
+            if (vPos < 2)
+                continue
+            if (StrLower(Trim(SubStr(vLine, 1, vPos - 1))) = StrLower(key))
+                return Trim(SubStr(vLine, vPos + 1))
+        }
+    } catch {
+    }
+    return ""
+}
+
+; ---- 输出文件路径反推根目录：<root>\state\cap_*.json 或 <root>\state\capture-serve.json ----
+RootFromOutFile() {
+    global g_outFile
+    try {
+        SplitPath(g_outFile, , &vDir)          ; <root>\state
+        vDir := RTrim(vDir, "\")
+        vPos := InStr(vDir, "\", , -1)         ; 最后一个反斜杠
+        if (vPos > 1)
+            return SubStr(vDir, 1, vPos - 1)
+    } catch {
+    }
+    return ""
+}
+
 
 Q(s) => Chr(34) s Chr(34)
 

@@ -48,3 +48,6 @@ settings-cs/bin/
 # ---- 本机真实菜单定义（含个人条目/路径）；公开仓库只放 example ----
 config/menus.conf
 config/menus.quicker*.conf
+# ---- Python 字节码缓存 ----
+__pycache__/
+

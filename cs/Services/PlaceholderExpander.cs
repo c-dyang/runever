@@ -21,12 +21,26 @@ namespace RunEverCs.Services
     {
         public static string Expand(string template, MatchContext ctx)
         {
+            // currentFile = null ⇒ 回落 ctx.FirstFilePath（既有单文件语义，逐字不变）
+            return Expand(template, ctx, null);
+        }
+
+        /// <summary>
+        /// 带「当前文件」的展开（2026-11-09 U-D 批量执行）：`%file%` 换成 <paramref name="currentFile"/>
+        /// —— 同一模板 × N 个选中文件时，每个文件展开一次。
+        ///
+        /// ★ `currentFile == null` ⇒ 等价于 <see cref="Expand(string, MatchContext)"/>（不改既有语义）；
+        ///   `currentFile == ""` ⇒ 明确按空串替换（"当前文件是空"，不是"没有当前文件"）。
+        /// ★ 其余占位符仍全部取自 ctx（批量只改 `%file%` 的口径）。
+        /// </summary>
+        public static string Expand(string template, MatchContext ctx, string currentFile)
+        {
             if (string.IsNullOrEmpty(template)) return "";
             if (ctx == null) return template;
 
             string s = template;
             s = s.Replace("%text%", ctx.Text ?? "");
-            s = s.Replace("%file%", ctx.FirstFilePath ?? "");
+            s = s.Replace("%file%", currentFile != null ? currentFile : (ctx.FirstFilePath ?? ""));
             s = s.Replace("%clip%", ctx.Clipboard ?? "");
             s = s.Replace("%win%", ctx.WinTitle ?? "");
             s = s.Replace("%proc%", ctx.ProcessName ?? "");

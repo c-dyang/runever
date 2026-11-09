@@ -43,6 +43,8 @@ Add-Case "confwrite"  @("--selftest-confwrite", $root) # ★ 段1.6 新增：B1 
 Add-Case "hotreload"  @("--selftest-hotreload", $root) # ★ 段1.7 新增：配置级热加载（menus.conf 换代 / auto.conf 全键 / I-5 开销）
 Add-Case "folderdlg"  @("--selftest-folderdlg", $root)  # ★ v9 新增：系统默认文件夹选择窗口（IFileOpenDialog）互操作
 Add-Case "menueditor" @("--selftest-menueditor", $root) # ★ v9 新增：树形条目编辑（结构操作 + 不变式 + 保存往返；沙箱副本）
+Add-Case "arch"       @("--selftest-arch", $root)      # ★ 拆-0 新增：分层引用方向（白名单 = 已知违规，按文件+类型）
+Add-Case "iconurl"    @("--selftest-iconurl", $root)   # ★ U-C 新增：图标源支持网址（favicon 缓存 + 协议白名单 + 不阻塞）
 Add-Case "selftest"   @("--selftest", $root)           # 总自检：报告固定落 state\selftest-cs.txt
 
 $hash = (Get-FileHash $Exe -Algorithm SHA256).Hash

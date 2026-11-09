@@ -65,6 +65,25 @@ namespace RunEverCs.Services
         /// </summary>
         public bool WaitWhenShown = true;
 
+        /// <summary>
+        /// auto.conf 的自动执行段（本类只取 `BatchMax`）—— 多选批量执行的条数上限来源。
+        /// ★ 未接线（null）⇒ 按 `AutoConf.BatchMax` 的默认值 10（与配置默认一致）。
+        /// ★ 接线点 = 宿主把 `AutoMatcher.Conf` 挂上来（本刀不动 RunEverApp.cs）。
+        ///   ⚠ `AutoMatcher.ReadConf` 每次都 **new AutoConf** ⇒ 挂的是实例引用，conf 重载后
+        ///   必须重挂（赋值点应与 `Executor.WaitWhenShown` 的镜像处同址）。
+        /// </summary>
+        public AutoConf Conf;
+
+        /// <summary>批量上限（读 <see cref="Conf"/>，未接线/非法值一律回落默认 10，下限 1）。</summary>
+        private int BatchLimit
+        {
+            get
+            {
+                int n = (Conf != null) ? Conf.BatchMax : 10;
+                return n < 1 ? 1 : n;
+            }
+        }
+
         // ============================================================
         // v8 新增：桩 / 取证 / 错误通道（自检与"禁静默失败"的落地）
         // ============================================================
@@ -156,11 +175,25 @@ namespace RunEverCs.Services
                     target = (target.Length == 0) ? suffix.Substring(1) : target + suffix;
                 }
             }
-            t.Log("DoAction type=" + t.Type + " resolvedTarget=[" + target + "]");
+
+            // ============================================================
+            // ★ 多选批量执行 = **循环体**（用户 2026-11-09 定口径）。
+            //   入参形态："同一 Target × N 个文件"（N ≥ 2）且动作类型支持逐文件 ⇒ 循环；
+            //   **N ≤ 1 一律走下面的原路径**（N=1 结果必须与改前逐字一致 = 回归红线）。
+            //   上限 = auto.conf 的 batchMax（<see cref="BatchLimit"/>）。
+            // ============================================================
+            bool batch = t.Files != null && t.Files.Count > 1 && IsBatchType(t.Type);
+
+            if (batch)
+                t.Log("DoAction type=" + t.Type + " batch=" + t.Files.Count + " batchMax=" + BatchLimit);
+            else
+                t.Log("DoAction type=" + t.Type + " resolvedTarget=[" + target + "]");
 
             Func<string, Task, bool> handler;
             if (!_table.TryGetValue(t.Type.Trim(), out handler))
                 return Fail(t, "unknown-action", "未知动作类型: " + t.Type);
+
+            if (batch) return ExecuteBatch(raw, t, autoAppend, handler);
 
             try
             {
@@ -203,6 +236,104 @@ namespace RunEverCs.Services
                 s = t.Text;
             }
             return s.Length == 0 ? "" : " " + s;
+        }
+
+        // ============================================================
+        // ---- 多选批量执行：同一 Target × N 个文件 = 循环体 ----
+        // ============================================================
+        /// <summary>
+        /// 会按文件循环的动作类型：`run` / `open`（主场景）+ `action` / `send` / `keys`
+        /// （用户口径：建议循环，但受 batchMax 总量上限）。
+        /// `url` / `evsearch` 不在内：前者是单串模板（无"文件 × 条目"语义），后者未实现。
+        /// </summary>
+        private static bool IsBatchType(string type)
+        {
+            string k = (type ?? "").Trim();
+            return string.Equals(k, "run", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(k, "open", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(k, "action", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(k, "send", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(k, "keys", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// 循环体：对选中的每个文件跑一次同一个条目。
+        ///
+        ///   · **逐文件替换** —— `%file%` 按**当前文件**展开（其余占位符取自 Task 不变）；
+        ///     参数为空时只追加**当前文件**（不是全部，否则每个文件都会重复带上整批）。
+        ///   · **失败继续** —— 第 k 个失败不短路，剩下的照跑（短路会让"3 个里坏 1 个"
+        ///     变成"只处理了 1 个"，用户以为全好了）。
+        ///   · **上限** —— 只做前 `batchMax` 个，超出部分不执行、不算失败，日志点明"已截断"。
+        ///   · **汇总** —— 结束时一行：`N 成功 / M 失败（失败文件: ...）`；成功数只数
+        ///     **真执行过且成功**的，被截断的既不记成功也不记失败。
+        /// </summary>
+        private bool ExecuteBatch(string raw, Task t, bool autoAppend, Func<string, Task, bool> handler)
+        {
+            int total = t.Files.Count;
+            int max = BatchLimit;
+            int run = Math.Min(total, max);
+            bool truncated = total > run;
+
+            if (truncated)
+            {
+                t.Log("批量：选中 " + total + " 个文件，超过上限 batchMax=" + max
+                    + " ⇒ **已截断**，只做前 " + run + " 个");
+            }
+
+            int okCount = 0;
+            var failed = new List<string>();
+            string lastCode = "", lastMsg = "";
+
+            for (int i = 0; i < run; i++)
+            {
+                string file = t.Files[i] ?? "";
+                string target = ReplaceVars(raw, t, file);
+                if (autoAppend)
+                {
+                    // 与单文件路径同规则：目标为空时不带前导空格
+                    string quoted = "\"" + file + "\"";
+                    target = (target.Length == 0) ? quoted : target + " " + quoted;
+                }
+
+                t.Log("批量[" + (i + 1) + "/" + run + "] file=[" + file + "] resolvedTarget=[" + target + "]");
+
+                LastError = "";
+                LastErrorCode = "";
+                bool ok;
+                try
+                {
+                    ok = handler(target, t);
+                }
+                catch (Exception ex)
+                {
+                    ok = Fail(t, "action-exception", "动作异常（" + t.Type + "）：" + ex.Message);
+                }
+
+                if (ok)
+                {
+                    okCount++;
+                }
+                else
+                {
+                    failed.Add(file);
+                    lastCode = LastErrorCode;
+                    lastMsg = LastError;
+                }
+                t.Log("批量[" + (i + 1) + "/" + run + "] " + (ok ? "成功" : "失败") + " " + file);
+            }
+
+            var sb = new StringBuilder();
+            sb.Append(okCount).Append(" 成功 / ").Append(failed.Count).Append(" 失败");
+            if (failed.Count > 0)
+                sb.Append("（失败文件: ").Append(string.Join(", ", failed.ToArray())).Append("）");
+            string summary = sb.ToString();
+            t.Log("批量汇总：" + "共 " + total + " 个文件，执行 " + run + " 个 → " + summary);
+
+            if (failed.Count == 0) return true;
+
+            LastErrorCode = "batch-partial-fail";
+            LastError = "批量执行 " + summary + "；最后失败[" + lastCode + "]: " + lastMsg;
+            return false;
         }
 
         // ============================================================
@@ -321,6 +452,8 @@ namespace RunEverCs.Services
         ///   · 判定口径与 `DoRun:179-192` 的插入点同源：显式路径（含 `\` `/`）不走缓存分支 ⇒ false；
         ///     缓存未命中则由系统解析兜底（`DoRun:167-176`）⇒ false；
         ///   · 返回 true 只是"可能现查"，**不改变 `DoRun` 自身行为**（真判定仍在 DoRun 内做）。
+        ///   · ★ 批量（U-D）：循环体里每个文件都是一次独立启动 ⇒ **逐个预判**，
+        ///     任一文件"可能要现查"就整体移交 worker（否则后面的文件会在消息线程上等）。
         /// </summary>
         public bool NeedsOnDemandResolve(Task t)
         {
@@ -328,7 +461,20 @@ namespace RunEverCs.Services
             if (!string.Equals((t.Type ?? "").Trim(), "run", StringComparison.OrdinalIgnoreCase))
                 return false;
 
-            string target = ReplaceVars(t.Target, t);
+            if (t.Files != null && t.Files.Count > 1)
+            {
+                int run = Math.Min(t.Files.Count, BatchLimit);
+                for (int i = 0; i < run; i++)
+                    if (NeedsOnDemandFor(t, t.Files[i])) return true;
+                return false;
+            }
+            return NeedsOnDemandFor(t, null);
+        }
+
+        /// <summary>单个文件的现查预判（currentFile = null ⇒ 既有单文件口径）。</summary>
+        private bool NeedsOnDemandFor(Task t, string currentFile)
+        {
+            string target = ReplaceVars(t.Target, t, currentFile);
             var parts = ConfParser.SplitWhitespace(target);
             if (parts.Count < 1) return false;
 
@@ -568,6 +714,17 @@ namespace RunEverCs.Services
             if (string.IsNullOrEmpty(s)) return "";
             if (t == null) return s;
             return PlaceholderExpander.Expand(s, ToMatchContext(t));
+        }
+
+        /// <summary>
+        /// 批量执行用：`%file%` 按**当前文件**展开（其余占位符仍取自 Task）。
+        /// 仍是同一唯一源的委托 —— 不新增第二份替换逻辑。
+        /// </summary>
+        public static string ReplaceVars(string s, Task t, string currentFile)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            if (t == null) return s;
+            return PlaceholderExpander.Expand(s, ToMatchContext(t), currentFile);
         }
 
         /// <summary>执行任务 → 判定上下文（占位符唯一源的入参形态）。</summary>

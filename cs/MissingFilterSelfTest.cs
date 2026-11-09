@@ -98,6 +98,43 @@ namespace RunEverCs
                 chk(has("HDR-部分可见"), "③ 子菜单标题: 有可见子项 ⇒ 标题保留");
                 chk(has("子项存在"), "③ 子菜单: 可见子项保留");
 
+                // ---- ⑦ F1 剪枝四形态夹具（走判定层：InjectEntryResolved → MatchEngine.Decide）----
+                //   (a) 子项全缺的 group 标题   (b) 子项全缺的**普通父条目**
+                //   (c) 三层嵌套只剩空壳        (d) 无子项的空壳 group
+                var pruneG = MakePruneFixture();
+                var pruneList = new List<MenuGroup> { pruneG };
+                var pctx = new MatchContext();
+                PathResolvePolicy.InjectEntryResolved(pctx, pruneList, cache, true, null);
+                var pdec = MatchEngine.Decide(pctx, pruneList);
+                var pTitles = AllTitles(pdec.Flat());
+
+                chk(!pTitles.Contains("A-全缺组"), "⑦(a) 子项全缺的 group 标题 ⇒ 剪掉");
+                chk(!pTitles.Contains("B-普通父"), "⑦(b) 普通父条目（子项全缺）⇒ 剪掉（不留空壳）");
+                chk(!pTitles.Contains("C-一层") && !pTitles.Contains("C-二层"),
+                    "⑦(c) 三层嵌套只剩空壳 ⇒ 整棵剪掉");
+                chk(!pTitles.Contains("D-空壳组"), "⑦(d) 无子项的空壳 group ⇒ 剪掉");
+                chk(pTitles.Contains("E-可见"), "⑦ 有可见内容的条目不受影响（不误杀）");
+
+                int shellNodes = CountShellNodes(pdec.Flat());
+                chk(shellNodes == 0, "⑦ 空壳节点数 = 0（输出中 items=0 的节点数）",
+                    "实际=" + shellNodes + " 输出=" + string.Join(",", pTitles.ToArray()));
+                chk(SubtreePruner.LastPrunedTotal == 4, "⑦ 剪空子树 = 4（四形态各算一棵）",
+                    "实际=" + SubtreePruner.LastPrunedTotal);
+
+                // ---- ⑧ F1-2 渲染护栏：只有空壳子菜单的分组 ⇒ 一个子菜单都不建 ----
+                var shellG = new MenuGroup { Name = "护栏夹具", Type = GroupType.Always };
+                shellG.Items.Add(It("护栏-空壳", ActionType.Group, "", 1));
+                var shellBuilt = MenuBuilder.Build(new List<MenuGroup> { shellG });
+                try
+                {
+                    chk(shellBuilt.Menu.CountSubMenus() == 0,
+                        "⑧ 渲染护栏: 空壳子菜单不 AddSubMenu（CountSubMenus = 0）",
+                        "实际子菜单数=" + shellBuilt.Menu.CountSubMenus());
+                    chk(MenuBuilder.LastPrunedSubtrees == 1,
+                        "⑧ 渲染护栏计数: 剪空子树 = 1", "实际=" + MenuBuilder.LastPrunedSubtrees);
+                }
+                finally { shellBuilt.Menu.Dispose(); }
+
                 // ---- ④ 统计口径：叶条目只计一次（标题不参与"检查/跳过"）----
                 int leafTotal = 0;
                 foreach (var it in g[0].Items) if (!it.IsGroupHeader) leafTotal++;
@@ -110,6 +147,9 @@ namespace RunEverCs
                 // ---- ⑤ 非破坏性：原对象没被改动 ----
                 chk(CountItems(g0) == n0, "⑤ 非破坏性: 原分组条目数未被改动");
 
+                // ★ 主 agent 验收补充：空目标父条目不得被连带剪掉
+                chk(has("父项空目标"), "⑦(e) 空目标的普通父条目（子项存在）⇒ 父项保留");
+                chk(has("空目标父条目下的可见子项"), "⑦(e) 空目标父条目下的可见子项 ⇒ 不被误剪");
                 // ---- ⑥ 日志可观测 ----
                 bool logged = false;
                 foreach (var l in log) if (l.Contains("缺件隐藏:")) { logged = true; break; }
@@ -162,12 +202,72 @@ namespace RunEverCs
             g.Items.Add(It("HDR-部分可见", ActionType.Group, "", 0));
             g.Items.Add(It("子项存在", ActionType.Run, "fake.exe", 1));
 
+            // ★ 主 agent 验收补充（防误剪）：非 group 的普通父条目、目标为空、子项存在
+            //   ⇒ 父项与子项都必须保留（空目标判不了 ⇒ Keep，不许连带剪子树）
+            g.Items.Add(It("父项空目标", ActionType.Run, "", 0));
+            g.Items.Add(It("空目标父条目下的可见子项", ActionType.Run, "fake.exe", 1));
+
             return new List<MenuGroup> { g };
         }
 
         private static MenuItem It(string title, ActionType t, string target, int level = 0)
         {
             return new MenuItem { Title = title, Type = t, Target = target, Level = level };
+        }
+
+        /// <summary>
+        /// F1 剪枝四形态夹具（一个组内四棵空子树 + 一条可见条目）：
+        ///   A 子项全缺的 group 标题 / B 子项全缺的普通父条目 /
+        ///   C 三层嵌套只剩空壳 / D 无子项的空壳 group / E 可见对照组。
+        /// </summary>
+        private static MenuGroup MakePruneFixture()
+        {
+            var g = new MenuGroup { Name = "剪枝夹具", Type = GroupType.Always, Line = 900 };
+
+            // (a) group 标题 + 子项全缺
+            g.Items.Add(It("A-全缺组", ActionType.Group, "", 1));
+            g.Items.Add(It("A-子缺", ActionType.Run, "no-such-prog-a.exe", 2));
+
+            // (b) 普通父条目（自身不判缺件）+ 子项全缺
+            g.Items.Add(It("B-普通父", ActionType.Keys, "^c", 1));
+            g.Items.Add(It("B-子缺", ActionType.Run, "no-such-prog-b.exe", 2));
+
+            // (c) 三层嵌套，最内层缺 ⇒ 整链只剩空壳
+            g.Items.Add(It("C-一层", ActionType.Group, "", 1));
+            g.Items.Add(It("C-二层", ActionType.Group, "", 2));
+            g.Items.Add(It("C-三层缺", ActionType.Run, "no-such-prog-c.exe", 3));
+
+            // (d) 无子项的空壳 group
+            g.Items.Add(It("D-空壳组", ActionType.Group, "", 1));
+
+            // 对照组：可见条目必须留着
+            g.Items.Add(It("E-可见", ActionType.Keys, "^v", 1));
+
+            return g;
+        }
+
+        /// <summary>统计输出里"items=0 的节点"数（空壳 = 组标题无子项，或容器子树内无可见叶条目）。</summary>
+        private static int CountShellNodes(List<MenuGroup> groups)
+        {
+            int bad = 0;
+            foreach (var g in groups)
+            {
+                var items = g.Items;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    int j = i + 1;
+                    int visible = 0;
+                    while (j < items.Count && items[j].Level > items[i].Level)
+                    {
+                        if (!items[j].IsGroupHeader) visible++;
+                        j++;
+                    }
+                    bool hasChildren = (j > i + 1);
+                    if (hasChildren && visible == 0) bad++;
+                    else if (!hasChildren && items[i].IsGroupHeader) bad++;
+                }
+            }
+            return bad;
         }
 
         private static int CountItems(List<MenuGroup> groups)

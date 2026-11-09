@@ -40,6 +40,9 @@ namespace RunEverCs.Services
             if (ctx == null) ctx = new MatchContext();
             if (multiHit == null) multiHit = new ConfigOrderResolver();
 
+            // 剪枝探针按"一次判定"重置（三个槽位各自可能剪，累计到本轮）
+            SubtreePruner.ResetLast();
+
             var list = new List<MenuGroup>();
             if (all != null)
                 foreach (var g in all)
@@ -124,6 +127,9 @@ namespace RunEverCs.Services
             }
             d.Dynamic = FilterMissing(ctx, list, dyn);
 
+            // ---- U-A 一键直达结论（仅扩展名槽位；剪枝之后才计数）----
+            SetOneShot(d);
+
             // ---- R7 进程槽位 ----
             var phits = MatchProcGroups(procG, ctx.ProcessNameLower);
             var procSel = new List<MenuGroup>();
@@ -148,6 +154,59 @@ namespace RunEverCs.Services
             d.Always = FilterMissing(ctx, list, alwaysG);
 
             return d;
+        }
+
+        /// <summary>
+        /// U-A 一键直达结论（2026-11-09）—— **纯数据、不读开关**（开关在消费点用
+        /// `MenuDecision.OneShotFor(conf)` 判）。
+        ///
+        /// 口径（用户 2026-11-09 定，四条缺一不可）：
+        ///   ① 只对扩展名槽位生效（R2：仅文件且扩展名恰命中 1 个 ext 组；兜底/文本/文件夹/混合都不算）；
+        ///   ② 该槽位**剪枝之后**的可执行条目数恰为 1（缺件隐藏已经跑完 —— 不能拿原始条目数糊弄）；
+        ///   ③ 命中 action / send / keys 一律**不**直达（直达会让人不知道发生了什么）；
+        ///   ④ always / fallback 段不参与（它们不是"选中文件才出现"的东西）。
+        ///
+        /// 任何一条不满足 ⇒ `OneShot = null` + 理由，调用方退化弹菜单。
+        /// </summary>
+        private static void SetOneShot(MenuDecision d)
+        {
+            var g = d.Dynamic.Count == 1 ? d.Dynamic[0] : null;
+            if (d.Rule != "R2" || d.FallbackShown || g == null || g.Type != GroupType.Ext)
+            {
+                d.OneShotReason = "非扩展名槽位";
+                return;
+            }
+
+            // 剪枝后的可执行条目 = 非分组标题的叶条目（缺件/空壳已被 FilterMissing 干掉）
+            MenuItem only = null;
+            int exec = 0;
+            if (g.Items != null)
+            {
+                foreach (var it in g.Items)
+                {
+                    if (it == null || it.IsGroupHeader) continue;
+                    exec++;
+                    only = it;
+                }
+            }
+
+            if (exec != 1)
+            {
+                d.OneShotReason = "可执行条目=" + exec + "（需恰 1）";
+                return;
+            }
+
+            switch (only.Type)
+            {
+                case ActionType.Action:
+                case ActionType.Send:
+                case ActionType.Keys:
+                    d.OneShotReason = "类型禁止直达:" + only.Type.ToString().ToLowerInvariant();
+                    return;
+            }
+
+            d.OneShot = only;
+            d.OneShotReason = "扩展名槽位唯一可执行条目";
         }
 
         /// <summary>扩展名命中组（去重后比对；关键词大小写不敏感、可带前导点）。</summary>
@@ -223,7 +282,9 @@ namespace RunEverCs.Services
         // 缺件注入位的**纯**应用（不查盘：只看 ctx.MissingItemIndex）
         // ============================================================
         /// <summary>
-        /// 按 `ctx.MissingItemIndex` 丢弃缺件条目，并剪掉"子项全缺"的子菜单标题。
+        /// 按 `ctx.MissingItemIndex` 丢弃缺件条目，再做**后序剪枝**：
+        /// 任何节点只要子树可见条目数为 0（空壳组标题 / 子项全被删空的普通父条目 / 任意嵌套层）
+        /// 就整棵丢弃 —— 菜单里不会留下"点开什么都没有"的节点。
         /// ★ 不做任何 IO —— 下标由解析层事先算好注入。
         /// </summary>
         public static List<MenuGroup> FilterMissing(MatchContext ctx, IList<MenuGroup> all, List<MenuGroup> groups)
@@ -251,40 +312,30 @@ namespace RunEverCs.Services
             foreach (var g in groups)
             {
                 if (g == null) continue;
-                var ng = new MenuGroup
+
+                // ① 逐条过滤：只丢"本机缺件的叶条目"；组标题一律先留着，交给剪枝判定
+                var src = g.Items ?? new List<MenuItem>();
+                var keep = new HashSet<MenuItem>();
+                foreach (var it in src)
+                {
+                    if (it == null) continue;
+                    if (it.IsGroupHeader || !Dropped(ctx, index, it)) keep.Add(it);
+                }
+
+                // ② 后序剪枝到不动点：子树可见数 = 0 的节点整棵丢
+                var stat = new SubtreePruner.PruneStat();
+                var items = SubtreePruner.Prune(src, keep, stat);
+                SubtreePruner.Accumulate(stat);
+
+                if (items.Count == 0) continue;
+                outList.Add(new MenuGroup
                 {
                     Name = g.Name,
                     Type = g.Type,
                     Keywords = g.Keywords,
                     Line = g.Line,
-                    Items = new List<MenuItem>()
-                };
-
-                var src = g.Items ?? new List<MenuItem>();
-                for (int i = 0; i < src.Count; i++)
-                {
-                    var it = src[i];
-
-                    if (it.IsGroupHeader)
-                    {
-                        int j = i + 1;
-                        while (j < src.Count && src[j].Level > it.Level) j++;
-                        bool hasChildren = (j > i + 1);
-                        bool anyKeep = false;
-                        for (int m = i + 1; m < j; m++)
-                        {
-                            if (!Dropped(ctx, index, src[m])) { anyKeep = true; break; }
-                        }
-                        if (hasChildren && !anyKeep) continue;      // 空子菜单标题不显示
-                        ng.Items.Add(it);
-                        continue;
-                    }
-
-                    if (Dropped(ctx, index, it)) continue;
-                    ng.Items.Add(it);
-                }
-
-                if (ng.Items.Count > 0) outList.Add(ng);
+                    Items = items
+                });
             }
             return outList;
         }

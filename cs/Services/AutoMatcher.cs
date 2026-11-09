@@ -54,6 +54,40 @@ namespace RunEverCs.Services
         /// 消费点 = `RunEverApp` 菜单关闭后 `MemTrim.Schedule(...)`。
         /// </summary>
         public int MemTrimIdle = 20;
+
+        // ============================================================
+        // 2026-11-09（U1）：下面这批键的**界面与解析先立好**，实现由各自的卡接。
+        //   这么做是为了并行：四张功能卡若各自去改 AutoMatcher.cs / SettingsPages.cs，
+        //   就会在同一个文件上排队 —— 记住键名与默认值由主 agent 一次性定死，卡里只实现行为。
+        // ============================================================
+
+        /// <summary>
+        /// 一键直达（用户 2026-11-09）：1 = 扩展名槽位只匹配到 1 个可执行条目时直接执行、不弹菜单。
+        /// 安全：命中 action / send / keys 一律退化弹菜单（见 open-items.md 口径）。
+        /// 消费点 = L1 `MenuDecision`（不是渲染层）。
+        /// </summary>
+        public int OneShot = 0;
+
+        /// <summary>`open sub &lt;目录&gt;` 是否在弹菜单时当场展开（用户 2026-11-09）。0 = 关（默认）。</summary>
+        public int SubmenuEnabled = 0;
+
+        /// <summary>子菜单最多几项（默认 20），超出截断 —— 防大目录把菜单撑爆。</summary>
+        public int SubmenuLimit = 20;
+
+        /// <summary>
+        /// 子菜单排序：`folder-first`（目录在前，默认）/ `name`（纯按名称）。
+        /// 只认这两个值，写错退回默认，绝不把非法值带进渲染。
+        /// </summary>
+        public string SubmenuOrder = "folder-first";
+
+        /// <summary>是否对子菜单里的目录继续展开（默认 0：绝大多是两层就够）。</summary>
+        public int SubmenuRecursive = 0;
+
+        /// <summary>递归层数（默认 2，上限 2 —— 再深没人点）。</summary>
+        public int SubmenuDepth = 2;
+
+        /// <summary>多选文件批量执行的条数上限（默认 10）：超过只做前 N 个，防手滑选中整个盘。</summary>
+        public int BatchMax = 10;
     }
 
     /// <summary>
@@ -197,6 +231,32 @@ namespace RunEverCs.Services
                         // ★ 菜单关闭后的内存整理空闲秒数（2026-11-08）：0 = 关
                         case "memtrimidle":
                             c.MemTrimIdle = ParseIntOr(val, c.MemTrimIdle);
+                            break;
+                        // ★ 2026-11-09（U1）：一键直达 / 文件夹子菜单 / 批量执行上限。
+                        //   这里只做**取值与校验**，行为在各自的卡里接（判定层 / 渲染层 / 执行层）。
+                        case "oneshot":
+                            c.OneShot = IsFalse(val) ? 0 : 1;
+                            break;
+                        case "submenuenabled":
+                            c.SubmenuEnabled = IsFalse(val) ? 0 : 1;
+                            break;
+                        case "submenulimit":
+                            c.SubmenuLimit = Math.Max(1, ParseIntOr(val, c.SubmenuLimit));
+                            break;
+                        case "submenuorder":
+                            {
+                                string v = (val ?? "").Trim().ToLowerInvariant();
+                                if (v == "name" || v == "folder-first") c.SubmenuOrder = v;
+                                break;
+                            }
+                        case "submenurecursive":
+                            c.SubmenuRecursive = IsFalse(val) ? 0 : 1;
+                            break;
+                        case "submenudepth":
+                            c.SubmenuDepth = Math.Min(2, Math.Max(1, ParseIntOr(val, c.SubmenuDepth)));
+                            break;
+                        case "batchmax":
+                            c.BatchMax = Math.Max(1, ParseIntOr(val, c.BatchMax));
                             break;
                     }
                 }

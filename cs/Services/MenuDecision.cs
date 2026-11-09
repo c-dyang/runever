@@ -73,6 +73,19 @@ namespace RunEverCs.Services
         /// <summary>动态槽位是否走了兜底（R3/R5/R6 或"该形态无对应组"）。</summary>
         public bool FallbackShown;
 
+        /// <summary>
+        /// 一键直达结论（U-A，2026-11-09）：本次命中**可以直接执行、不必弹菜单**的那一条。
+        /// 只有扩展名槽位（R2 且剪枝后恰 1 个可执行条目、且不是 action/send/keys）才会给出；
+        /// 其余形态恒为 null（always / fallback / text / folder / 兜底都不参与）。
+        ///
+        /// ★ 纯数据：`auto.conf` 的 oneShot 开关**不在这里读** —— 用 <see cref="OneShotFor"/>
+        ///   在消费点一并判掉（判定层零 IO / 零配置依赖）。
+        /// </summary>
+        public MenuItem OneShot;
+
+        /// <summary>一键直达结论的理由（给出或拒绝的原因；日志 / 自检断言用，格式不作契约）。</summary>
+        public string OneShotReason = "";
+
         public int DynamicCount { get { return Dynamic.Count; } }
         public int ProcessCount { get { return Process.Count; } }
         public int AlwaysCount { get { return Always.Count; } }
@@ -128,6 +141,18 @@ namespace RunEverCs.Services
             foreach (var g in flat)
                 if (g != null && g.Items != null) n += g.Items.Count;
             return n;
+        }
+
+        /// <summary>
+        /// 按 `auto.conf` 的 oneShot 开关取直达目标（U-A）：
+        /// 开关关闭（0 / 未配置）或本就没有结论 ⇒ null，调用方照常弹菜单。
+        /// 语义 = "宁可退化弹菜单，也不误直达"。
+        /// </summary>
+        public MenuItem OneShotFor(AutoConf conf)
+        {
+            if (OneShot == null) return null;
+            if (conf == null || conf.OneShot == 0) return null;
+            return OneShot;
         }
 
         public override string ToString()

@@ -316,7 +316,10 @@ namespace RunEverCs
 
                 ex.DryRun = true;
 
-                // B1：open + 参数为空（空目标）+ 选中文件（多个）⇒ 追加各自带引号的完整路径
+                // B1：open + 参数为空（空目标）+ 选中文件
+                //   ★ 2026-11-09（U-D）口径变更：多个选中文件不再拼成一次 `"p1" "p2"` 调用，
+                //     改为**逐文件循环**（每个文件一次、各自追加自己的引号路径）——
+                //     净效果仍是"两个文件都被打开"，与 U-D① 同源。
                 var b1logs = new List<string>();
                 var b1t = new Executor.Task
                 {
@@ -328,11 +331,10 @@ namespace RunEverCs
                 bool b1ok = ex.Execute(b1t);
                 int b1hits = b1logs.FindAll(s => s.StartsWith("DryRun open", StringComparison.Ordinal)).Count;
                 chk(b1ok && b1hits == 2
-                    && string.CompareOrdinal(pickResolved(b1logs),
-                        "\"" + realFile + "\" \"" + realFile2 + "\"") == 0,
-                    "B1 open + 参数为空 + 选中文件 ⇒ 追加 \"p1\" \"p2\"（各自带引号、空格分隔）",
-                    "hits=" + b1hits + " resolved=[" + pickResolved(b1logs) + "]"
-                    + " 期望=[" + "\"" + realFile + "\" \"" + realFile2 + "\"]");
+                    && b1logs.Exists(s => s.IndexOf("resolvedTarget=[\"" + realFile + "\"]", StringComparison.Ordinal) >= 0)
+                    && b1logs.Exists(s => s.IndexOf("resolvedTarget=[\"" + realFile2 + "\"]", StringComparison.Ordinal) >= 0),
+                    "B1 open + 参数为空 + 选中文件 ⇒ 逐文件追加各自引号路径（每个文件一次，U-D 循环体）",
+                    "hits=" + b1hits + " 日志=" + string.Join(" | ", b1logs.ToArray()));
 
                 // B2：action + 参数为空 + 只选中文本 ⇒ 追加该文本原文（不加引号）
                 var b2t = new Executor.Task { Type = "action", Target = "cmd.exe", Text = "选中文本" };
@@ -400,6 +402,169 @@ namespace RunEverCs
                 chk(b5urlOk && b5sendOk && b5keysOk,
                     "B5 url / send / keys 不适用自动追加（url 空目标仍报 url-empty-target）",
                     "url=" + ex.LastErrorCode + " send=" + ex.LastSend + " keys=" + ex.LastKeys);
+
+                // ------------------------------------------------------------
+                // ★ U-D（2026-11-09）：多选文件批量执行 = **循环体**
+                //   口径：同一 Target × N 个文件 ⇒ 逐文件执行；失败继续；结束汇总
+                //   `N 成功 / M 失败`（带失败文件名）；上限 = auto.conf 的 batchMax。
+                // ------------------------------------------------------------
+                sb.AppendLine();
+                sb.AppendLine("--- U-D 多选批量执行（循环体）---");
+
+                var batchFiles = new List<string>();
+                for (int i = 1; i <= 5; i++)
+                {
+                    string bf = Path.Combine(tmp, "batch" + i + ".txt");
+                    File.WriteAllText(bf, "b", new UTF8Encoding(false));
+                    batchFiles.Add(bf);
+                }
+                string batchGone = Path.Combine(tmp, "batch缺件", "不存在.txt");
+
+                // ① 3 个文件 ⇒ 目标被执行 3 次（计数断言）
+                var u1logs = new List<string>();
+                bool u1ok = ex.Execute(new Executor.Task
+                {
+                    Type = "open",
+                    Target = "",
+                    Files = new List<string> { batchFiles[0], batchFiles[1], batchFiles[2] },
+                    Log = s => u1logs.Add(s)
+                });
+                int u1hits = u1logs.FindAll(s => s.StartsWith("DryRun open", StringComparison.Ordinal)).Count;
+                chk(u1ok && u1hits == 3,
+                    "U-D① 3 个文件 ⇒ 逐文件执行 3 次（DryRun 计数 = 3）",
+                    "ok=" + u1ok + " hits=" + u1hits);
+
+                // ② 第 2 个失败 ⇒ 仍跑完 3 个；汇总 2 成功 / 1 失败 且带失败文件名
+                var u2logs = new List<string>();
+                bool u2ok = ex.Execute(new Executor.Task
+                {
+                    Type = "open",
+                    Target = "",
+                    Files = new List<string> { batchFiles[0], batchGone, batchFiles[2] },
+                    Log = s => u2logs.Add(s)
+                });
+                int u2hits = u2logs.FindAll(s => s.StartsWith("DryRun open", StringComparison.Ordinal)).Count;
+                string u2sum = "";
+                foreach (var s in u2logs)
+                    if (s.StartsWith("批量汇总", StringComparison.Ordinal)) u2sum = s;
+                chk(!u2ok && u2hits == 2
+                    && u2sum.IndexOf("2 成功 / 1 失败", StringComparison.Ordinal) >= 0
+                    && u2sum.IndexOf(batchGone, StringComparison.Ordinal) >= 0,
+                    "U-D② 第 2 个失败 ⇒ 不短路（仍跑完 3 个）＋ 汇总 2 成功 / 1 失败 且失败项带文件名",
+                    "ok=" + u2ok + " 成功执行=" + u2hits + " 汇总=[" + u2sum + "]");
+
+                // ③ %file% 逐文件替换（3 个不同文件名的目标各展开成自己的路径）
+                var u3logs = new List<string>();
+                bool u3ok = ex.Execute(new Executor.Task
+                {
+                    Type = "action",
+                    Target = "echo %file%",
+                    Files = new List<string> { batchFiles[0], batchFiles[1], batchFiles[2] },
+                    Log = s => u3logs.Add(s)
+                });
+                bool u3each = true;
+                for (int i = 0; i < 3; i++)
+                {
+                    string want = "resolvedTarget=[echo " + batchFiles[i] + "]";
+                    int hits = u3logs.FindAll(s => s.IndexOf(want, StringComparison.Ordinal) >= 0).Count;
+                    if (hits != 1) u3each = false;
+                }
+                chk(u3ok && u3each,
+                    "U-D③ %file% 按当前文件展开：3 个文件各展开成自己的路径（每个恰好 1 次）",
+                    "ok=" + u3ok + " 日志=" + string.Join(" | ", u3logs.ToArray()));
+
+                // ④ batchMax=2 + 5 个文件 ⇒ 只跑前 2 个，日志含"截断"
+                var savedConf = ex.Conf;
+                ex.Conf = new AutoConf { BatchMax = 2 };
+                var u4logs = new List<string>();
+                bool u4ok = ex.Execute(new Executor.Task
+                {
+                    Type = "open",
+                    Target = "",
+                    Files = batchFiles,
+                    Log = s => u4logs.Add(s)
+                });
+                int u4hits = u4logs.FindAll(s => s.StartsWith("DryRun open", StringComparison.Ordinal)).Count;
+                bool u4trunc = u4logs.Exists(s => s.IndexOf("已截断", StringComparison.Ordinal) >= 0);
+                bool u4third = u4logs.Exists(s => s.IndexOf(batchFiles[2], StringComparison.Ordinal) >= 0);
+                ex.Conf = savedConf;
+                chk(u4ok && u4hits == 2 && u4trunc && !u4third,
+                    "U-D④ batchMax=2 + 5 个文件 ⇒ 只跑前 2 个（第 3 个未执行）＋ 日志含\"已截断\"",
+                    "hits=" + u4hits + " 截断=" + u4trunc + " 第3个出现=" + u4third);
+
+                // ⑤ 各类型也循环：run / action / send / keys 各计数断言（url 不循环）
+                var u5run = new List<string>();
+                bool u5runOk = ex.Execute(new Executor.Task
+                {
+                    Type = "run", Target = cmdExe + " /c exit 0 %file%",
+                    Files = new List<string> { batchFiles[0], batchFiles[1], batchFiles[2] },
+                    Log = s => u5run.Add(s)
+                });
+                int u5runHits = u5run.FindAll(s => s.StartsWith("Run: ", StringComparison.Ordinal)).Count;
+
+                var u5act = new List<string>();
+                bool u5actOk = ex.Execute(new Executor.Task
+                {
+                    Type = "action", Target = "echo x", Flag = ActionFlag.Hide,
+                    Files = new List<string> { batchFiles[0], batchFiles[1], batchFiles[2] },
+                    Log = s => u5act.Add(s)
+                });
+                int u5actHits = u5act.FindAll(s => s.StartsWith("DryRun action", StringComparison.Ordinal)).Count;
+
+                var u5send = new List<string>();
+                bool u5sendOk = ex.Execute(new Executor.Task
+                {
+                    Type = "send", Target = "a+b",
+                    Files = new List<string> { batchFiles[0], batchFiles[1] },
+                    Log = s => u5send.Add(s)
+                });
+                int u5sendHits = u5send.FindAll(s => s.StartsWith("DryRun send", StringComparison.Ordinal)).Count;
+
+                var u5keys = new List<string>();
+                bool u5keysOk = ex.Execute(new Executor.Task
+                {
+                    Type = "keys", Target = "^c",
+                    Files = new List<string> { batchFiles[0], batchFiles[1] },
+                    Log = s => u5keys.Add(s)
+                });
+                int u5keysHits = u5keys.FindAll(s => s.StartsWith("DryRun keys", StringComparison.Ordinal)).Count;
+
+                chk(u5runOk && u5runHits == 3 && u5actOk && u5actHits == 3
+                    && u5sendOk && u5sendHits == 2 && u5keysOk && u5keysHits == 2,
+                    "U-D⑤ run / action / send / keys 同样按文件循环（3/3/2/2 次）",
+                    "run=" + u5runHits + " action=" + u5actHits
+                    + " send=" + u5sendHits + " keys=" + u5keysHits);
+
+                // ⑤b 批量现查预判（I-5）：只有第 2 个文件才可能现查 ⇒ 也必须判 true，
+                //     否则循环体里第 2 个文件会在消息线程上等 ≤1200ms。
+                ex.OnDemandResolve = delegate (string prog) { return ""; };
+                bool u5b = ex.NeedsOnDemandResolve(new Executor.Task
+                {
+                    Type = "run",
+                    Target = "%file% /c exit 0",
+                    Files = new List<string> { "cmd.exe", "rveprobe.exe" }
+                });
+                ex.OnDemandResolve = null;
+                chk(u5b,
+                    "U-D⑤b 批量现查预判逐文件覆盖（第 2 个文件才可能要现查 ⇒ 仍返回 true）",
+                    "ret=" + u5b);
+
+                // ⑥ 单文件不回归：N=1 仍走原路径（1 次执行、无批量汇总行、§6 追加逐字一致）
+                var u6logs = new List<string>();
+                bool u6ok = ex.Execute(new Executor.Task
+                {
+                    Type = "open",
+                    Target = "",
+                    Files = new List<string> { batchFiles[0] },
+                    Log = s => u6logs.Add(s)
+                });
+                int u6hits = u6logs.FindAll(s => s.StartsWith("DryRun open", StringComparison.Ordinal)).Count;
+                bool u6noBatch = !u6logs.Exists(s => s.StartsWith("批量", StringComparison.Ordinal));
+                chk(u6ok && u6hits == 1 && u6noBatch && ex.LastOpenTarget == batchFiles[0]
+                    && string.CompareOrdinal(pickResolved(u6logs), "\"" + batchFiles[0] + "\"") == 0,
+                    "U-D⑥ N=1 不回归：只执行 1 次、无批量汇总行、追加结果与改前逐字一致",
+                    "ok=" + u6ok + " hits=" + u6hits + " 无批量行=" + u6noBatch
+                    + " resolved=[" + pickResolved(u6logs) + "]");
 
                 ex.DryRun = false;
             }

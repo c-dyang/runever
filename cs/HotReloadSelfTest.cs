@@ -960,15 +960,26 @@ namespace RunEverCs
             _sb.AppendLine("--- C10. 难点④：hotkey 不由热加载处理（注册期键）---");
             try
             {
-                // ① 结构证据：AutoConf 仍是 6 个字段、且**没有** hotkey ⇒ 不存在"文件 vs 内存"双路径
+                // ① 结构证据：AutoConf 含全部"热键期开关"，且**没有** hotkey ⇒ 不存在"文件 vs 内存"双路径
                 var fields = typeof(AutoConf).GetFields(BindingFlags.Public | BindingFlags.Instance);
                 var names = new List<string>();
                 foreach (var f in fields) names.Add(f.Name);
                 _sb.AppendLine("  AutoConf 字段（" + fields.Length + "）= " + Join(names));
-                // 2026-11-08：8 个字段 —— 菜单显示后端（uiBackend）与采集后端（captureBackend）
-                // 两个模式开关已随 WPF 菜单后端整体撤掉；其余仍是"热键期不该反复重读"的开关。
-                Eq("C10 AutoConf 字段数 = 8（enabled/minLen/cacheSeconds/showByDefault/waitWhenShown/hideMissing/menuOrder/memTrimIdle）",
-                    fields.Length.ToString(), "8");
+                // ★ 2026-11-09（U1）：原来断言「字段数 = 8」—— 一加键就红，而且它证明不了
+                //   "该在的都在、不该有的没有"（把 hideMissing 换成任意一个别的键，计数照样是 8）。
+                //   改成**集合判据**：必备键逐个在场（大小写不敏感）+ 绝不含 hotkey。
+                //   以后新增开关只要不改这 8 个老键，本套就不会误红。
+                string[] required =
+                {
+                    "Enabled", "MinLen", "CacheSec", "ShowByDefault", "WaitWhenShown",
+                    "HideMissing", "MenuOrder", "MemTrimIdle"
+                };
+                var missing = new List<string>();
+                foreach (var r in required)
+                    if (names.FindIndex(x => string.Equals(x, r, StringComparison.OrdinalIgnoreCase)) < 0)
+                        missing.Add(r);
+                Check("C10 AutoConf 必备字段全在（enabled/minLen/cacheSeconds/showByDefault/waitWhenShown/hideMissing/menuOrder/memTrimIdle）",
+                    missing.Count == 0, missing.Count == 0 ? "" : "缺=" + Join(missing));
                 bool hasHotkeyField = false;
                 foreach (var f in fields)
                     if (f.Name.IndexOf("hotkey", StringComparison.OrdinalIgnoreCase) >= 0) hasHotkeyField = true;

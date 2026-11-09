@@ -1,8 +1,28 @@
 # Quicker 条目 → menus.conf 转换报告
 
 - 源：`docs/条目结构解析.txt`（145 行）
-- 产物：`config/menus.quicker.conf`（分组 17，条目 129）
-- 丢弃合计：0 条；**Quicker 内置动作已救回 37 条**（转成 `run QuickerStarter.exe runaction:<动作ID>`，见下节）
+- 产物：`config/menus.quicker.conf`（分组 17，条目 128；另有 1 条分割线 `----|` 按设计丢弃）
+- 条目构成：`group` 7 / `run` 67 / `url` 54（其中 Quicker 内置动作 37）
+- 丢弃合计：0 条；**Quicker 内置动作已救回 37 条**（转成 `url quicker:runaction:<动作ID>`，见下节）
+
+## 2026-11-09 修订（F2：空目标一律 group）
+
+**问题**：源里有 `清理工具(_Q)|^` 这类条目 —— 值不是空，但 `程序^参数` 里程序为空。
+转换器原来只把 `val==""` / `val=="\t"` 判成 group，`^` 落到 else 分支后 target 为空串，
+产出 `清理工具  _q  | run `（非 group 父条目 + 空目标 + 带子项），就是菜单里空节点的成因。
+
+**改法**：group 判定移到「算出 target 之后」，只留一条口径 —— **最终目标为空 ⇒ `| group`**。
+覆盖四类空目标：`""`（值空）、`"\t"`（字面量转义）、`"^"`（程序为空）、`"动作="`（动作 ID 为空）。
+`^pubic→fallback` / `^tips→always` / `^search→text` 等既有映射**未动**。
+
+**结果**：`清理工具  | group`。条目数 128 不变，只有类型分布变：group 6→7、run 68→67。
+全文件「空目标的 run/open 条目」= **0 行**。
+
+## 合并版（`config/menus.quicker.merged.conf`）
+
+由 `python quicker2runever.py --merged` 派生：去掉文件头注释，把第二个及以后的 `always` 组
+（个人工具箱、游戏）降级成首个 `always` 组（永久显示）末尾的 `| group` 子菜单。
+分组 17→15、`always` 组 3→1（满足架构契约 I-3）；条目 128→130（多出两条 `| group` 折叠头）。
 
 ## 分组一览
 
@@ -10,7 +30,7 @@
 |---|---|---|---|
 | 文件夹 | folder | - | 4 |
 | 通用菜单 | fallback | - | 49 |
-| 文本菜单 | text | - | 23 |
+| 文本菜单 | text | - | 21 |
 | 永久显示 | always | - | 12 |
 | 音乐 | ext | mp3 wav flac wma ogg | 1 |
 | 图片 | ext | ai avif b64 bmp bpg cur cut dib emf eps exif exr fax fits gif hdr heic heif ico jfif jp2 jpe jpeg jpg jxl mjpeg pbm pcx pgm png ppm psd qoi svg tga tif tiff viff vx webp wmf wpg | 5 |
@@ -21,8 +41,7 @@
 | 浏览器 | proc | msedge vivaldi firefox chrome zen | 7 |
 | 聊天 | proc | qq wechat | 2 |
 | PDF | ext | pdf | 3 |
-| Office | ext | doc docx xls xlsx ppt pptx | 2 |
-| Wps(_W)|ksolaunch.exe | proc | /prometheus /fromksolaunch /from | 0 |
+| Office | ext | doc docx xls xlsx ppt pptx | 3 |
 | 个人工具箱 | always | - | 5 |
 | 游戏 | always | - | 2 |
 | 模拟器 | proc | virtualboxvm vmware | 1 |
@@ -34,14 +53,14 @@
 - `EmEditor` → `EmEditor.exe`（出现在：通用菜单、纯文本）
 - `Notepad4` → `Notepad4.exe`（出现在：通用菜单、纯文本）
 - `MusicPlayer2` → `MusicPlayer2.exe`（出现在：通用菜单、音乐）
-- `切换浏览器（动作）` → `QuickerStarter.exe runaction:997d7f2e-ab94-423d-90d7-3e78264ccd34`（出现在：文本菜单、浏览器）
-- `全文搜索（动作）` → `QuickerStarter.exe runaction:6fc71b89-aac8-4cd6-9366-282afa5c5f94`（出现在：文本菜单、永久显示）
-- `超级工具箱（动作）` → `QuickerStarter.exe runaction:f6ef3fc4-6abf-46b1-acb6-83215d201f80`（出现在：永久显示、图片、个人工具箱）
+- `切换浏览器（动作）` → `quicker:runaction:997d7f2e-ab94-423d-90d7-3e78264ccd34`（出现在：文本菜单、浏览器）
+- `全文搜索（动作）` → `quicker:runaction:6fc71b89-aac8-4cd6-9366-282afa5c5f94`（出现在：文本菜单、永久显示）
+- `超级工具箱（动作）` → `quicker:runaction:f6ef3fc4-6abf-46b1-acb6-83215d201f80`（出现在：永久显示、图片、个人工具箱）
 
 ## Quicker 内置动作（已转成外部启动）
 
-> 形式：`run QuickerStarter.exe runaction:<动作ID>`。**存裸程序名**（换机免重配，由目标机解析链去找）。
-> ⚠️ **需要目标机装了 Quicker**（`QuickerStarter.exe` + `quicker:` 协议），否则执行器会报 `run-missing`。
+> 形式：`url quicker:runaction:<动作ID>`。走 `quicker:` 协议（ShellExecute 交给系统，无路径依赖）。
+> ⚠️ **需要目标机装了 Quicker 专业版**，且 Quicker 不能以管理员身份运行，否则协议不可用。
 > 需要把选中内容传给动作时，在目标后加 `?%text%` 或 `?%file%`（见 Quicker 文档的 `runaction:标识?参数`）。
 
 | 分组 | 标题 | 动作ID |

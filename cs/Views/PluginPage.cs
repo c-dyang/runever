@@ -46,6 +46,8 @@ namespace RunEverCs.Views
             top.Children.Add(MkBtn("＋ 新建插件（模板向导）", OnNewPlugin, true));
             top.Children.Add(MkBtn("编辑（UI 字段）", OnEdit, true));
             top.Children.Add(MkBtn("编辑源码", OnEditSource, false));
+            // ★ 配置块面板（照 Listary「API 文档」）：只读展示 + 一键复制 + 从剪贴板导入
+            top.Children.Add(MkBtn("配置块…", OnConfigBlock, false));
             top.Children.Add(MkBtn("删除（进回收站）", OnDelete, false));
             top.Children.Add(MkBtn("刷新", (s, e) => Reload(), false));
             top.Children.Add(MkBtn("打开插件目录", (s, e) =>
@@ -261,6 +263,23 @@ namespace RunEverCs.Views
             var row = _grid.SelectedItem as PluginRow;
             if (row == null) { _status.Text = "请先选一个插件"; return; }
             EditPlugin(row.Info);
+        }
+
+        /// <summary>
+        /// 「配置块…」—— 导出当前插件的配置块 / 粘贴一段配置导入。
+        /// 选中插件 ⇒ 面板默认显示该插件的块（可覆盖写回）；
+        /// 未选中   ⇒ 显示格式契约 + 两个成品样例（只读，导入后可另存为新插件）。
+        /// </summary>
+        private void OnConfigBlock(object sender, RoutedEventArgs e)
+        {
+            var row = _grid.SelectedItem as PluginRow;
+
+            var dlg = new PluginConfigDialog(_root, row == null ? null : row.Info);
+            if (dlg.ShowDialog() == true)
+            {
+                Reload();
+                _status.Text = string.IsNullOrEmpty(dlg.ResultText) ? "已更新插件" : dlg.ResultText;
+            }
         }
 
         private void EditPlugin(PluginInfo p)

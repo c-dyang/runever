@@ -14,7 +14,7 @@ namespace RunEverCs.Views
     /// 新版按微软官方《Guidelines for app settings》与 Windows 11 设置页的实际结构：
     ///   · **左侧导航列表 + 右侧内容区**（顶部 Tab 超过 4 个就开始横着挤，且无法分组）；
     ///   · 内容区单列、最大宽度 1000px、灰底白卡；
-    ///   · 每页只讲一个主题：菜单与条目 / 触发与行为（含插件） / 路径解析 / 诊断（含同步、日志、关于）；
+    ///   · 每页只讲一个主题：菜单与条目 / 触发与行为（含插件） / 路径解析 / 同步 / 诊断（含日志、关于）；
     ///   · 页面**懒加载**（点才建），避免一次构造多页拖慢开窗。
     /// </summary>
     public class SettingsWindow : Window
@@ -71,13 +71,18 @@ namespace RunEverCs.Views
             _nav.ItemContainerStyle = BuildNavStyle();
             _nav.SelectionChanged += (s, e) => ShowSelected();
 
-            // ★ B1-6（2026-11-08）：导航 7 页 → **4 页**。
+            // ★ B1-6（2026-11-08）：导航 7 页 → 4 页。
             //   合并口径：「插件」并入「触发与行为」末尾；「同步」+「日志与诊断」+「关于」并入「诊断」。
             //   为什么合并：7 页里有 3 页各自只有 1-2 行设置，点进去像"空房间"，
             //   用户要找一个开关得先把 7 个标题过一遍。
+            // ★ 2026-11-09（A4）：把「同步」从诊断里拆出来 ⇒ **5 页**（下面是唯一权威顺序）。
+            //   这一格不是"回到 7 页"：同步是唯一**要填值**的块（地址/账号/口令/目录），
+            //   留在排障页里既不好找，也让「诊断」的"只是看看"主题不纯；
+            //   「日志与诊断」「关于」仍合并，没必要拆回去。
             AddNav("菜单与条目", "菜单与条目");
             AddNav("触发与行为", "触发与行为");
             AddNav("路径解析", "路径解析");
+            AddNav("同步", "同步");
             AddNav("诊断", "诊断");
 
             // ---- 右：内容 ----
@@ -213,9 +218,14 @@ namespace RunEverCs.Views
                     {
                         var p = new PathResolvePage(_root); Hook(p); return p;
                     }
+                case "同步":
+                    {
+                        // 2026-11-09（A4）：同步从诊断页拆出，独立成页（见 SyncPage.Build）
+                        var p = new SyncPage(_root); Hook(p); return p;
+                    }
                 case "诊断":
                     {
-                        // 同步 / 日志 / 关于 三块已并成这一页（见 DiagnosticsPage.Build）
+                        // 日志 / 状态目录 / 关于（同步已拆走，见 SyncPage）
                         var p = new DiagnosticsPage(_root); Hook(p); return p;
                     }
             }

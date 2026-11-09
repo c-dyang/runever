@@ -89,7 +89,11 @@ namespace RunEverCs.Views
                     "选中文本 → 匹配插件 → 直接执行，不弹菜单",
                     GetBool("enabled", true), v => SetBool("enabled", v)),
                 SettingsKit.Text("最小文本长度", "短于该长度的选中文本不触发自动执行",
-                    Get("minLen", "4"), v => SetInt("minLen", PInt(v, 4)), 90)));
+                    Get("minLen", "4"), v => SetInt("minLen", PInt(v, 4)), 90),
+                // ★ 2026-11-09（U1）：键先立好，判定层实现在「一键直达」卡里接（L1 MenuDecision）
+                SettingsKit.Toggle("一键直达（仅扩展名）",
+                    "扩展名槽位只匹配到 1 个可执行条目时直接执行，不弹菜单；action / send / keys 不直达",
+                    GetBool("oneShot", false), v => SetBool("oneShot", v))));
 
             sp.Children.Add(SettingsKit.SectionHeader("菜单显示"));
 
@@ -103,6 +107,31 @@ namespace RunEverCs.Views
                 SettingsKit.Toggle("显示窗口时等待命令结束",
                     "窗口留存，可看进度",
                     GetBool("waitWhenShown", true), v => SetBool("waitWhenShown", v))));
+
+            // ★ 2026-11-09（U1）：四个文件夹子菜单键 + 批量执行上限，界面先立好，
+            //   渲染/解析/执行三处的实现在各自的卡里接（open sub / 批量执行）。
+            sp.Children.Add(SettingsKit.Card(
+                SettingsKit.Toggle("文件夹条目展开为子菜单",
+                    "menus.conf 里用 open sub <目录> 时，弹菜单当场枚举该目录生成子菜单；目录空/无权限则不展开",
+                    GetBool("submenuEnabled", false), v => SetBool("submenuEnabled", v)),
+                SettingsKit.Text("子菜单最多几项",
+                    "超出部分截断，防止大目录把菜单撑爆",
+                    Get("submenuLimit", "20"), v => SetInt("submenuLimit", PInt(v, 20)), 90),
+                SettingsKit.Combo("子菜单排序", "目录在前，或纯按名称",
+                    new[] { "目录优先", "按名称" },
+                    Get("submenuOrder", "folder-first") == "name" ? "按名称" : "目录优先",
+                    v => Set("submenuOrder", v == "按名称" ? "name" : "folder-first")),
+                SettingsKit.Toggle("子菜单递归展开",
+                    "对子菜单里的目录继续展开（默认关：绝大多数场景两层就够）",
+                    GetBool("submenuRecursive", false), v => SetBool("submenuRecursive", v)),
+                SettingsKit.Text("递归层数",
+                    "仅在开启递归时生效；上限 2（再深没人点）",
+                    Get("submenuDepth", "2"), v => SetInt("submenuDepth", PInt(v, 2)), 90)));
+
+            sp.Children.Add(SettingsKit.Card(
+                SettingsKit.Text("批量执行上限",
+                    "多选文件时逐条循环执行同一条目；超过该数量只做前 N 个（防手滑选中整个盘）",
+                    Get("batchMax", "10"), v => SetInt("batchMax", PInt(v, 10)), 90)));
 
             // ★ 2026-11-08：菜单三段顺序（auto.conf 的 menuOrder）
             //   为什么放这里：它决定"弹出来的菜单里谁在上面"，属于菜单显示策略，不属外观。
@@ -118,9 +147,12 @@ namespace RunEverCs.Views
 
             sp.Children.Add(SettingsKit.Card(
                 _orderHost,
-                SettingsKit.Info("生效方式", "改完立即写盘，下一次弹菜单就按新顺序（不用重启托盘）"),
-                SettingsKit.Info("哪一档为空就没有那一块", "例如没选中东西且配置里没有兜底分组时，动态那格是空的，此时排它不会有可见变化"),
-                SettingsKit.Info("分组内条目的先后", "仍去「菜单项」页用拖拽调整，这里只排三段内容块的先后")));
+                // ★ 2026-11-09（U1）：三条解释性长句合成整段（原来各占一行 Info + 分隔线，
+                //   看着像三个可配置项）。见 SettingsKit.Note 的注释。
+                SettingsKit.Note(
+                    "改完立即写盘，下一次弹菜单就按新顺序（不用重启托盘）。\n" +
+                    "某一档为空时那一块不出现 —— 例如没选中东西、且配置里没有兜底分组时，动态那格是空的，此时排它不会有可见变化。\n" +
+                    "分组内条目的先后仍去「菜单项」页用拖拽调整，这里只排三段内容块的先后。")));
 
             sp.Children.Add(SettingsKit.SectionHeader("插件"));
 
@@ -306,19 +338,21 @@ namespace RunEverCs.Views
     }
 
     /// <summary>
-    /// 诊断：同步（WebDAV）／日志／状态目录／关于。
-    /// ★ B1-6：原「同步」「日志与诊断」「关于」三页合并到这一页 —— 三页各自只有 2-4 行，
-    ///   拆开只会让人来回点；合并后顺序是「要配的（同步）→ 要看的（日志/目录）→ 只是看看的（关于）」。
+    /// 同步（WebDAV）。
+    /// ★ 2026-11-09（A4）：整块从「诊断」页搬出来独立成页 —— 「同步」是**要配的**，
+    ///   和「诊断」里那些**只是看看的**（日志/目录/关于）不是一类事；塞在一起时
+    ///   用户找同步得先知道它住在排障页里。
+    ///   控件、键名（webdavUrl/User/Pass/Dir、syncOnStart）、`LostFocus` 即存、口令脱敏钩子
+    ///   全部原样搬过来，只换了宿主页 ⇒ 「改一项存一项」和 `--sync` 链路零变更。
     /// </summary>
-    internal class DiagnosticsPage : AutoConfPage
+    internal class SyncPage : AutoConfPage
     {
-        public DiagnosticsPage(string root) : base(root) { }
+        public SyncPage(string root) : base(root) { }
 
         protected override UIElement Build()
         {
             var sp = new StackPanel();
 
-            // ================= 同步（WebDAV） =================
             sp.Children.Add(SettingsKit.SectionHeader("同步（WebDAV）"));
 
             // ★ 未配置时**不置灰**（置灰会让人永远填不进来 —— 自锁），改成一句人话说明：
@@ -338,6 +372,25 @@ namespace RunEverCs.Views
                 SettingsKit.Toggle("启动时自动同步", "托盘就绪后异步执行，不拖慢启动",
                     GetBool("syncOnStart", false), v => SetBool("syncOnStart", v))));
 
+            return sp;
+        }
+    }
+
+    /// <summary>
+    /// 诊断：日志／状态目录／关于。
+    /// ★ B1-6：原「同步」「日志与诊断」「关于」三页合并到这一页 —— 三页各自只有 2-4 行，
+    ///   拆开只会让人来回点。
+    /// ★ 2026-11-09（A4）：「同步（WebDAV）」又从这里拆出去独立成页（见 <see cref="SyncPage"/>）——
+    ///   它是唯一"要填值"的块，留在排障页里既不好找、也让本页的"看"主题不纯。
+    /// </summary>
+    internal class DiagnosticsPage : AutoConfPage
+    {
+        public DiagnosticsPage(string root) : base(root) { }
+
+        protected override UIElement Build()
+        {
+            var sp = new StackPanel();
+
             // ================= 日志 =================
             sp.Children.Add(SettingsKit.SectionHeader("日志"));
 
@@ -354,6 +407,7 @@ namespace RunEverCs.Views
                 SettingsKit.Info("状态目录", System.IO.Path.Combine(Root, "state")),
                 SettingsKit.Info("自动配置", ConfPath),
                 SettingsKit.Info("上次全盘自检", LastSelfCheckText()),
+                SettingsKit.Info("缺件隐藏 / 空子菜单", LastPruneText()),
                 SettingsKit.ButtonRow("打开配置目录", "menus.conf / auto.conf 所在位置",
                     "打开", () => OpenDir(System.IO.Path.Combine(Root, "config")))));
 
@@ -369,10 +423,12 @@ namespace RunEverCs.Views
             sp.Children.Add(SettingsKit.Card(
                 // ★ B4c-1：菜单早就不走 WPF 了（`NativeMenu` = CreatePopupMenu + AppendMenuW +
                 //   TrackPopupMenuEx），写「WPF ContextMenu（MahApps）」是过期描述，会误导排障方向。
-                SettingsKit.Info("菜单渲染", "Win32 原生（CreatePopupMenu + TrackPopupMenu）"),
-                SettingsKit.Info("采集", "native（Win32 + UI Automation）／ahk（CaptureRunner）"),
-                SettingsKit.Info("搜索后端", "Everything SDK（EV) / es.exe 兜底"),
-                SettingsKit.Info("图标", "ExtractIconExW + 内存缓存，失败回落 assets\\runever.ico")));
+                // ★ 2026-11-09（U1）：四条能力说明合成整段（原各占一行 Info），同 Note 注释。
+                SettingsKit.Note(
+                    "· 菜单渲染：Win32 原生（CreatePopupMenu + TrackPopupMenu）\n" +
+                    "· 采集：native（Win32 + UI Automation）／ ahk（CaptureRunner）\n" +
+                    "· 搜索后端：Everything SDK（EV）/ es.exe 兜底\n" +
+                    "· 图标：ExtractIconExW + 内存缓存，失败回落 assets\\runever.ico")));
 
             return sp;
         }
@@ -391,6 +447,26 @@ namespace RunEverCs.Views
             }
             catch { }
             return "还没跑过（托盘 → 维护 → 全盘自检…）";
+        }
+
+        /// <summary>
+        /// 「缺件隐藏 / 剪掉空子菜单」的只读统计（F1-5）。
+        /// 数据源 = 托盘进程弹菜单时写的 state\menu-prune-last.txt（与日志行同源），
+        /// 本页只读文件、不重算 —— 设置窗口是另一进程，拿不到托盘的内存态。
+        /// </summary>
+        private string LastPruneText()
+        {
+            try
+            {
+                string f = System.IO.Path.Combine(Root, "state", "menu-prune-last.txt");
+                if (System.IO.File.Exists(f))
+                {
+                    string s = System.IO.File.ReadAllText(f).Trim();
+                    if (s.Length > 0) return s;
+                }
+            }
+            catch { }
+            return "还没有记录（弹一次菜单后显示）";
         }
 
         private void OpenLog()

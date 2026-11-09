@@ -125,6 +125,18 @@ namespace RunEverCs
                     case "--selftest-folderdlg":
                         Environment.ExitCode = FolderPickerSelfTest.Run(args);
                         return;
+                    // ★ 拆-0（2026-11-09）：架构自检 —— 分层引用方向（Models/Services/Native/Views）
+                    //   只扫 using 行，不改任何业务代码；已知违规走白名单（按文件+类型）。
+                    //   口径：--selftest-arch <root> <out.txt>，**禁带 --root**。
+                    case "--selftest-arch":
+                        Environment.ExitCode = ArchSelfTest.Run(args);
+                        return;
+                    // ★ U-C（2026-11-09）：图标源支持网址 —— 协议白名单 / 缓存命中零网络 /
+                    //   未命中先兜底后后台补齐 / 超时 ≤3s / 缓存键 = sha256(url) 前 16 位。
+                    //   口径：--selftest-iconurl <root> <out.txt>，**禁带 --root**，离线可跑。
+                    case "--selftest-iconurl":
+                        Environment.ExitCode = IconUrlSelfTest.Run(args);
+                        return;
                     case "--selftest":
                         RunSelfTest(root);
                         return;

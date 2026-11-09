@@ -17,12 +17,38 @@ namespace RunEverCs.Services
     ///
     /// 动作类型：run / open / url / action / send / keys / group
     ///   action 后面的白名单词 hide/show 被吃成 Flag，其余归 Target。
+    ///   ★ 2026-11-09（U-B）：紧随类型（或 hide/show 之后）的 `sub` 是第三个修饰位取值，
+    ///     仅对 open 生效 ⇒ 渲染期展开成子菜单（见 MenuBuilder）。行语法不变。
     /// </summary>
     public class ConfParser
     {
         public List<MenuGroup> Groups { get; private set; } = new List<MenuGroup>();
 
         private readonly string _path;
+
+        // ============================================================
+        // ★ L2/F3：解析后的结构规范化统计（解析层唯一归属）
+        // ============================================================
+        /// <summary>
+        /// 本次解析里被**就地升格**的父条目数（原本 Type != Group、却有更深 Level 的子项）。
+        /// 正常配置为 0。
+        /// </summary>
+        public int AutoFixCount { get; private set; }
+
+        /// <summary>本次升格的明细（行号 / 标题 / 是否丢弃了动作目标）；无升格时为空。</summary>
+        public List<string> AutoFixNotes { get; private set; } = new List<string>();
+
+        /// <summary>本次解析的规范化汇总行，恒有值：<c>结构自动修正=N</c>（供日志 / 自检同源展示）。</summary>
+        public string NormalizeReport { get; private set; } = "结构自动修正=0";
+
+        /// <summary>最近一次解析的升格数（跨实例探针：日志 / 诊断 / 自检共用同一数字）。</summary>
+        public static int LastAutoFixCount;
+
+        /// <summary>
+        /// 可选日志出口（调用方注入时优先走它，例如挂到托盘主日志）。
+        /// 未注入 ⇒ 尝试追加到已存在的 <c>&lt;root&gt;\state\runever-cs.log</c>（不主动创建，见 EmitLog）。
+        /// </summary>
+        public static Action<string> LogSink;
 
         public ConfParser(string path)
         {
@@ -33,6 +59,9 @@ namespace RunEverCs.Services
         public void Parse()
         {
             Groups = new List<MenuGroup>();
+            AutoFixCount = 0;
+            AutoFixNotes = new List<string>();
+            NormalizeReport = "结构自动修正=0";
             if (!File.Exists(_path))
                 throw new FileNotFoundException("配置文件不存在: " + _path);
 
@@ -64,6 +93,153 @@ namespace RunEverCs.Services
                 if (cur < 0) continue;
                 ParseItemLine(rawLine, cur, lineNo);
             }
+
+            // ★ L2/F3：解析完成后的**唯一一次**结构规范化（在判定层之前）。
+            //   语义：只升格、不改行序、不改 Level、不删子项；无子项的普通条目不碰。
+            NormalizeStructure();
+        }
+
+        // ============================================================
+        // ★ L2/F3：结构规范化 —— 有子项的非 group 父条目 ⇒ 升格为子菜单标题
+        // ============================================================
+
+        /// <summary>
+        /// 判断父子用**与 MenuBuilder / SubtreePruner 同款的层级栈**：
+        /// 对每个条目，弹出所有 Level &gt;= 当前 Level 的栈顶，新的栈顶就是它的父条目
+        /// （跳级配置也能正确挂到"最近的更浅层"上，不会因为下一条更深就乱认父）。
+        ///
+        /// 只改内存结构，不写盘、不动配置文件：
+        ///   · 被判定为父、且 Type != Group ⇒ Type = Group
+        ///   · 丢弃动作目标（group 没有动作）与 action 的 hide/show 标记
+        ///   · 保留 Title / Hotkey / IconSource / Level / Line / 行序
+        ///   · 原目标非空 ⇒ 记一条明细（"丢了一个目标"），不静默吞
+        /// </summary>
+        private void NormalizeStructure()
+        {
+            AutoFixCount = 0;
+            AutoFixNotes = new List<string>();
+
+            foreach (var g in Groups)
+            {
+                if (g == null || g.Items == null || g.Items.Count < 2) continue;
+
+                // ① 先按层级栈收集"有子项"的父条目（判定期间不改任何对象）
+                var parents = new List<MenuItem>();
+                var seen = new HashSet<MenuItem>();
+                var stack = new List<MenuItem>();
+
+                foreach (var it in g.Items)
+                {
+                    if (it == null) continue;
+
+                    while (stack.Count > 0 && stack[stack.Count - 1].Level >= it.Level)
+                        stack.RemoveAt(stack.Count - 1);
+
+                    if (stack.Count > 0)
+                    {
+                        var parent = stack[stack.Count - 1];
+                        if (seen.Add(parent)) parents.Add(parent);
+                    }
+
+                    stack.Add(it);
+                }
+
+                // ② 就地升格（保持原有顺序）
+                foreach (var p in parents)
+                {
+                    if (p.IsGroupHeader) continue;    // 已经是 group：只保留，不计数
+
+                    string lostTarget = (p.Target ?? "").Trim();
+
+                    p.Type = ActionType.Group;
+                    p.Target = "";
+                    p.Flag = ActionFlag.None;
+                    p.Sub = false;      // ★ U-B：升格成 group 就没有 open 动作了，展开位随之失效
+
+                    AutoFixCount++;
+
+                    string note = "结构自动修正: 第 " + p.Line + " 行「" + p.Title
+                        + "」非 group 但有子项 ⇒ 升格为 group（Level=" + p.Level + " 不变）";
+                    if (lostTarget.Length > 0)
+                        note += "，丢弃动作目标「" + lostTarget + "」";
+                    AutoFixNotes.Add(note);
+                }
+            }
+
+            NormalizeReport = "结构自动修正=" + AutoFixCount;
+            LastAutoFixCount = AutoFixCount;
+
+            // ③ 可观测：明细逐条 + 汇总一行（恒输出，含 =0，便于对照）
+            foreach (var note in AutoFixNotes) EmitLog(note);
+            EmitLog(NormalizeReport);
+        }
+
+        /// <summary>
+        /// 规范化日志出口：注入了 <see cref="LogSink"/> 就走调用方；否则**追加到已存在**的
+        /// <c>&lt;root&gt;\state\runever-cs.log</c>（与托盘 / CLI 同一份日志）。
+        /// 不主动创建日志文件 —— 只读引用（如 pc 复现配置）与自检临时目录零副作用；
+        /// 任何写失败都不影响解析（与 ConfigSync.AppendAppLog 同口径）。
+        /// </summary>
+        private void EmitLog(string line)
+        {
+            if (LogSink != null)
+            {
+                try { LogSink(line); } catch { }
+                return;
+            }
+
+            try
+            {
+                string confDir = Path.GetDirectoryName(_path);
+                if (string.IsNullOrEmpty(confDir)) return;
+                if (!string.Equals(Path.GetFileName(confDir), "config", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                string root = Path.GetDirectoryName(confDir);
+                if (string.IsNullOrEmpty(root)) return;
+
+                string log = Path.Combine(root, "state", "runever-cs.log");
+                if (!File.Exists(log)) return;    // 不创建：没有日志就没有输出
+                if (!AppLogEnabled(root)) return; // 尊重 auto.conf 的 log/loglevel=0
+
+                File.AppendAllText(log,
+                    DateTime.Now.ToString("HH:mm:ss") + " " + line + Environment.NewLine,
+                    new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// 读 auto.conf 的日志开关（与 RunEverApp.ReadLogSettings 同口径：默认开，后出现的键覆盖前者）。
+        /// 只用于决定"要不要往已存在的 runever-cs.log 追加一行"，不改变任何其它行为。
+        /// </summary>
+        private static bool AppLogEnabled(string root)
+        {
+            try
+            {
+                string conf = Path.Combine(root, "config", "auto.conf");
+                if (!File.Exists(conf)) return true;
+
+                bool on = true;
+                foreach (var raw in File.ReadAllLines(conf, Encoding.UTF8))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+
+                    string k = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string v = line.Substring(eq + 1).Trim();
+                    if (k == "log" || k == "loglevel")
+                    {
+                        int n;
+                        if (int.TryParse(v, out n)) on = n > 0;
+                        else on = (v == "true" || v == "1");
+                    }
+                }
+                return on;
+            }
+            catch { return true; }
         }
 
         // ---- 分组行: "名称  类型  关键词..." ----
@@ -133,6 +309,7 @@ namespace RunEverCs.Services
             // 动作部分
             ActionType type = ActionType.Group;
             ActionFlag flag = ActionFlag.None;
+            bool sub = false;
             string target = "";
 
             if (actionPart.Length > 0)
@@ -155,6 +332,26 @@ namespace RunEverCs.Services
                         idx = 2;
                     }
                 }
+
+                // ★ 2026-11-09（U-B）：第三个修饰位取值 `sub`。
+                //   · 只认**修饰位**上的 sub（类型之后 / hide|show 之后），目标里出现 sub 不动；
+                //   · 只对 open 置位；其它动作类型按"普通修饰位、忽略"吃掉，并留一行日志；
+                //   · hide/show 的解析一个字没动（上面那段原样保留）。
+                if (ap.Count >= idx + 1
+                    && string.Equals(ap[idx], "sub", StringComparison.OrdinalIgnoreCase))
+                {
+                    idx++;
+                    if (type == ActionType.Open)
+                    {
+                        sub = true;
+                    }
+                    else
+                    {
+                        EmitLog("第 " + lineNo + " 行「" + title + "」: 修饰位 sub 只对 open 生效，已忽略（动作="
+                            + type.ToString().ToLowerInvariant() + "）");
+                    }
+                }
+
                 if (ap.Count >= idx + 1)
                 {
                     // 剩余部分作为目标（保留原样，含空格）
@@ -174,6 +371,7 @@ namespace RunEverCs.Services
                 Hotkey = hotkey,
                 Type = type,
                 Flag = flag,
+                Sub = sub,
                 Target = target,
                 Level = level,
                 Line = lineNo

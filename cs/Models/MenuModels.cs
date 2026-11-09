@@ -42,6 +42,15 @@ namespace RunEverCs.Models
         public string Hotkey { get; set; } = "";
         public ActionType Type { get; set; } = ActionType.Group;
         public ActionFlag Flag { get; set; } = ActionFlag.None;
+
+        /// <summary>
+        /// `open sub &lt;目录&gt;` 的展开标记（2026-11-09 / U-B）。
+        /// ★ 只是**渲染期**语义：子项当场从目录枚举，绝不写回 menus.conf；
+        ///   目录不存在 / 无权限 / 为空 ⇒ 渲染层退化为普通 open（见 MenuBuilder）。
+        /// 与 Flag 是两个正交的轴（hide/show 控制执行窗口，Sub 控制菜单形态）。
+        /// </summary>
+        public bool Sub { get; set; }
+
         public string Target { get; set; } = "";
 
         /// <summary>缩进层级（0 = 顶层）。</summary>
@@ -63,6 +72,7 @@ namespace RunEverCs.Models
                 Hotkey = Hotkey,
                 Type = Type,
                 Flag = Flag,
+                Sub = Sub,
                 Target = Target,
                 Level = Level,
                 Line = Line,

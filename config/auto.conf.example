@@ -83,6 +83,11 @@ webdavDir=RunEver
 # 启动时自动同步：0 = 关（默认）/ 1 = 开（托盘就绪后异步跑，不拖慢启动）
 syncOnStart=0
 
+# 远程（UNC）路径是否做存在性探测：留空/skip = 不探测（默认，秒开）；
+#   probe = 探测（能识别"远程目录被选中"⇒ folder 组菜单会出现，但每次要 SMB 往返）。
+#   实测：本地 stat 0.4ms / UNC 活地址 16–59ms / UNC 死地址 26.6 秒 ⇒ 默认不动网络。
+remoteStat=skip
+
 # ── 已取消的两个开关（2026-11-08 定案）──────────────────────────────
 # 旧版曾有 captureBackend（ahk / native）与 uiBackend（win32 / wpf）两个可切后端。
 # 现在固定：采集 = AHK 常驻管道（CaptureRunner.exe）、菜单 = Win32 TrackPopupMenu。
