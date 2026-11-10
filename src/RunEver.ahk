@@ -586,6 +586,16 @@ ShowMenu(*) {
         . " dynamic=" st["dynamic"] " fallback=" st["fallback"]
         . " | proc=" ctx.Win["proc"] " text=" (StrLen(ctx.Text)) "B files=" ctx.Files.Length)
 
+    ; ★ L3 菜单追加（2026-11-10）：RVE_FN_Menu := true 的插件 → always 段末尾
+    ;   位置在渲染之前；追加失败只记日志（插件元数据问题不能把核心菜单打空）
+    try {
+        vPn := g_autoMatcher.AppendMenuItems(groups, ctx.Text)
+        if (vPn > 0)
+            Log("  插件菜单项: " vPn "（追加到 always 段末尾）")
+    } catch as e {
+        Log("  插件菜单追加异常（忽略，核心菜单照常）: " e.Message)
+    }
+
     ; 3. 渲染（Win32 原生菜单）
     t3 := A_TickCount
     vR := BuildMenu(groups, ctx)
@@ -618,12 +628,19 @@ ShowMenu(*) {
 ; ============================================================
 ; ★ 自动执行（匹配块）· 2026-10-03 定案
 ;
-; 流程：选中文本 → 匹配插件 → 产出目标 → 复用执行器派发
-; 返回：true = 已派发（调用方应跳过弹菜单）；false = 未命中/放弃（走正常链路）
+; 流程：选中文本 → 匹配插件 → 按插件声明的形态定档（声明即定档，核心不仲裁）
+; 返回：true = 已处理（已派发或已接管，调用方应跳过弹菜单）；false = 走正常链路
+;
+; ★ 三层权限（2026-11-10 定案）：
+;   L1 intercept → 调插件 Run(text)，插件自己弹菜单；核心**不建菜单、不派发、不追加**。
+;      Run 返回非空 = 接管成功；空串 / 异常 / 超时 ⇒ 回落弹菜单。
+;   L2 六种产出 → 命中即派发、跳过弹菜单（原行为不动）。
+;   L3 Menu=true → **不自动派发**，改由 AutoMatcher.AppendMenuItems 追加进菜单。
+;   ★ 互斥：intercept + Menu 冲突 ⇒ intercept 优先（Menu 忽略）。
 ;
 ; ★ 失败兜底三层（用户定案）：
 ;   ① 无规则命中 → 返回 false → 弹菜单
-;   ② 脚本返回空串 → 返回 false → 弹菜单
+;   ② 脚本返回空串 → 返回 false → 弹菜单（含 intercept 接管失败）
 ;   ③ 派发失败 → 返回 false → 弹菜单
 ; ============================================================
 TryAutoExec(ctx) {
@@ -641,6 +658,23 @@ TryAutoExec(ctx) {
     p := r["plugin"]
     vOut := r["out"]
     vTarget := r["target"]
+
+    ; ---- L1 接管：插件自己弹菜单，核心只负责"跳过" ----
+    if (vOut = "intercept") {
+        vAck := CallPluginRun(p["path"], vText, InterceptTimeoutMs())
+        if (vAck = "") {
+            Log("  接管失败: 插件 " p["name"] " 未确认接管 → 回落弹菜单")
+            return false
+        }
+        Log("  接管命中: " p["name"] " (prio=" p["prio"] ") ack=" vAck)
+        return true
+    }
+
+    ; ---- L3 互斥：Menu=true ⇒ 进菜单，不自动派发 ----
+    if (p["menu"]) {
+        Log("  菜单插件（menu=true）: " p["name"] " → 不自动派发，改由菜单项触发")
+        return false
+    }
 
     ; ---- 形态 B：无 Tpl ⇒ 由插件脚本产出目标 ----
     if (vTarget = "") {
@@ -672,6 +706,19 @@ TryAutoExec(ctx) {
     }
 }
 
+; ============================================================
+; ★ L3 菜单追加（2026-11-10）：实现在 AutoMatcher.AppendMenuItems
+;   （位置在渲染之前；追加失败只记日志，见 ShowMenu）
+; ============================================================
+
+; ---- intercept（L1 接管）的等待上限（ms）----
+;   ★ 为什么比形态 B 的 3000 长：接管插件在 Run(text) 里要**弹自己的菜单并等用户选**，
+;     3 秒红线会把手慢的用户直接判失败；但仍必须有界 —— 插件挂死不能拖死热键。
+;     （与 C# 侧 RunEverApp.InterceptTimeoutMs 保持一致）
+InterceptTimeoutMs() {
+    return 8000
+}
+
 ; ---- 调插件脚本的 Run(text) 产出目标（形态 B）----
 ;   ★ 实现方式：起独立进程执行插件脚本的 Run()，通过临时文件回传结果。
 ;     不用 #Include（那是加载期行为，热键路径不能重载脚本）。
@@ -681,7 +728,8 @@ TryAutoExec(ctx) {
 ;     调 Run(text) → 结果写入输出文件 → 主程序读回
 ;
 ;   返回：目标字符串；失败返回 ""（调用方回落弹菜单）
-CallPluginRun(pluginPath, text) {
+;   timeoutMs：有界等待上限（默认 3000；intercept 走 8000）
+CallPluginRun(pluginPath, text, timeoutMs := 3000) {
     global
 
     vTmpDir := RVE_STATE "\autotmp"
@@ -743,9 +791,10 @@ CallPluginRun(pluginPath, text) {
     try {
         vPid2 := 0
         Run('"' vAhk '" "' vDrvFile '" "' vInFile '" "' vOutFile '"', , , &vPid2)
-        ; 有界等待：最多 3 秒（脚本简单，通常 <300ms）
+        ; 有界等待：默认最多 3 秒（脚本简单，通常 <300ms）；
+        ; intercept 接管传 8 秒（等用户在自己的菜单里选）
         vWait := 0
-        while (vWait < 3000) {
+        while (vWait < timeoutMs) {
             if (FileExist(vOutFile))
                 break
             Sleep 30

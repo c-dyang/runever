@@ -272,20 +272,31 @@ namespace RunEverCs.Views
         // ============================================================
         private void UpdatePanels()
         {
+            bool isIntercept = (_out.SelectedItem != null
+                && string.Equals(_out.SelectedItem.ToString(), "intercept", StringComparison.OrdinalIgnoreCase));
+
             bool isTpl = (_out.SelectedItem != null
                 && string.Equals(_out.SelectedItem.ToString(), "url", StringComparison.OrdinalIgnoreCase));
 
-            // url 用模板；其他类型隐藏模板框
+            // url 用模板；其他类型（含 intercept）隐藏模板框
             _tplPanel.Visibility = isTpl ? Visibility.Visible : Visibility.Collapsed;
 
             bool hasCmd = !string.IsNullOrEmpty(_origCommand);
             _cmdPanel.Visibility = hasCmd ? Visibility.Visible : Visibility.Collapsed;
 
-            _formHint.Text = isTpl
-                ? "形态 A（模板型）：目标由「目标模板」代入 {0} 生成，不需要写代码。"
-                : (hasCmd
-                    ? "形态 B（逻辑型）：检测到 Run() 中的命令模板，可直接在此修改。"
-                    : "形态 B（逻辑型）：脚本体里有自定义逻辑，请用「编辑源码」修改。");
+            // ★ 三层权限（2026-11-10）：产出形态 = 派发 / 接管 / 菜单可见
+            string form = isIntercept
+                ? "形态 B（接管型）：命中后核心不弹菜单，由插件的 Run(text) 自己弹；"
+                    + "返回非空 = 接管成功，空/异常/超时 ⇒ 回落核心菜单（不使用 Tpl）。"
+                : (isTpl
+                    ? "形态 A（模板型）：目标由「目标模板」代入 {0} 生成，不需要写代码。"
+                    : (hasCmd
+                        ? "形态 B（逻辑型）：检测到 Run() 中的命令模板，可直接在此修改。"
+                        : "形态 B（逻辑型）：脚本体里有自定义逻辑，请用「编辑源码」修改。"));
+
+            _formHint.Text = form
+                + "\r\n产出形态：派发（run/open/url/action/send/keys） · 接管（intercept）"
+                + " · 菜单可见（RVE_FN_Menu := true，不自动派发，追加到菜单末尾）";
         }
 
         /// <summary>

@@ -137,6 +137,12 @@ namespace RunEverCs
                     case "--selftest-iconurl":
                         Environment.ExitCode = IconUrlSelfTest.Run(args);
                         return;
+                    // ★ S1（2026-11-10）：全库搜索 —— 虚拟固定项「全库搜索」/ 拼音匹配 /
+                    //   搜索页可见集合 = 菜单可见集合（同一 hideMissing 口径）/ 执行载荷同一构造。
+                    //   口径：--selftest-search <root> <out.txt>，**禁带 --root**，离线可跑。
+                    case "--selftest-search":
+                        Environment.ExitCode = PinyinSearchSelfTest.Run(args);
+                        return;
                     case "--selftest":
                         RunSelfTest(root);
                         return;

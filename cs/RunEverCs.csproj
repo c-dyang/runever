@@ -44,4 +44,16 @@
     <Reference Include="WindowsBase" />
   </ItemGroup>
 
+  <!-- S1（2026-11-10）：全库搜索的拼音匹配。
+       `Microsoft.International.Converters.PinYinConverter`（微软官方，net20 兼容）的
+       程序集文件名是 ChnCharInfo.dll —— 随包放在 **仓库根的 lib\**（不进 GAC、不引 NuGet，
+       离线可构建）。Private=true ⇒ 拷到 bin\Release，exe 旁边必须有它才能跑拼音。
+       ★ 只有 Views\FullSearchWindow.cs 用它；主菜单 / 热键路径不引用 ⇒ 零额外启动开销。 -->
+  <ItemGroup>
+    <Reference Include="ChnCharInfo">
+      <HintPath>..\lib\ChnCharInfo.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
 </Project>

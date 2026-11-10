@@ -24,6 +24,75 @@ namespace RunEverCs.Services
             public int ItemCount;
             public int IconHit;
             public int IconFallback;
+
+            /// <summary>
+            /// 固定项「全库搜索」的命令 ID（0 = 本次没有追加）。
+            /// ★ 它**不在** <see cref="IdMap"/> 里 —— 派发方必须先判这个字段，再查 IdMap
+            ///   （见 RunEverApp.ShowMenuFlow 的 MenuPick 分流）。
+            /// </summary>
+            public int FixedSearchId;
+        }
+
+        // ============================================================
+        // ★ S1（2026-11-10）：虚拟固定项 —— 「全库搜索」
+        //
+        // 用户定案：菜单**最后**恒有这一项，且**虚拟化**：
+        //   · 不进 menus.conf（配置里根本没有这一行）
+        //   · 不占条目 ID（用保留段 0x7E00–0x7EFF；条目 ID 由 NativeMenu.AllocId 从 1 递增）
+        //   · 不可编辑/删除（不进 IdMap ⇒ 条目编辑器、回写、保存校验闸都看不见它）
+        //   · 不参与剪枝/隐藏失效（**Build 之后**才追加，任何过滤都碰不到它）
+        //   · 只在渲染层末尾追加（本方法就是唯一入口）
+        //
+        // ★ 为什么不塞进 Build()：`Build` 的语义是"分组 → 菜单"，固定项不属于配置；
+        //   塞进去会让每个调用方（含全部既有自检的菜单计数）凭空多一条与配置无关的项。
+        //   追加点收在 `RunEverApp.ShowMenuFlow` 弹菜单前一行。
+        // ============================================================
+
+        /// <summary>固定项显示文本。无快捷键、无 `&` 助记（它不该抢按键）。</summary>
+        public const string FullSearchTitle = "全库搜索";
+
+        /// <summary>固定项图标：shell32.dll 的放大镜（用户定案）。</summary>
+        public const string FullSearchIcon = "SHELL32.dll,22";
+
+        /// <summary>虚拟固定项的保留命令 ID 段起点（0x7E00–0x7EFF）。</summary>
+        public const int FixedCommandIdBase = 0x7E00;
+
+        /// <summary>「全库搜索」的命令 ID（IdMap 之外的保留 ID，与条目 ID 不重叠）。</summary>
+        public const int FullSearchId = FixedCommandIdBase + 1;
+
+        /// <summary>
+        /// 在菜单**末尾**追加固定项「全库搜索」，返回它的命令 ID（0 = 追加失败）。
+        /// 菜单非空时先补一条分隔线（与"组间分隔线"同一风格），避免与最后一条条目粘连。
+        /// ★ 条目数（<see cref="BuildResult.ItemCount"/>）不因它变化 —— 它不是一个配置条目。
+        /// </summary>
+        public static int AppendFullSearch(BuildResult built)
+        {
+            if (built == null || built.Menu == null) return 0;
+            var menu = built.Menu;
+
+            // 先放分隔线：Count()>0 说明上面已经有内容（含"全空菜单"的禁用占位项）
+            if (menu.Count() > 0) menu.AddSeparator();
+
+            int id = FullSearchId;
+            if (built.IdMap != null && built.IdMap.ContainsKey(id))
+            {
+                // 理论不可达（从 1 递增的分配器要产出 0x7E01 得有 32256 个条目）。
+                // 真撞上就退化成"正常分配一个 ID" —— 宁可多占一个 ID，也不许点错派发。
+                id = menu.AddItem(FullSearchTitle);
+            }
+            else
+            {
+                // 固定 ID 只能绕过 NativeMenu.AddItem（它强制分配新 ID）⇒ 直接走 Win32，
+                // flags 与 AddItem 完全相同，只有 ID 由我们指定。
+                if (!Win32.AppendMenuW(menu.Handle, Win32.MF_STRING, new IntPtr(id), FullSearchTitle))
+                    return 0;
+            }
+
+            if (menu.SetIconById(id, FullSearchIcon)) built.IconHit++;
+            else built.IconFallback++;
+
+            built.FixedSearchId = id;
+            return id;
         }
 
         /// <summary>2026-11-07 分段计时（只读探针，不改行为）—— 用于决定"缓存什么才真正省时间"。</summary>

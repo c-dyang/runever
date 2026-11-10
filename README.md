@@ -1,32 +1,40 @@
-# RunEver
+<div align="center">
 
-**按一下热键，弹出一份只跟"此刻"有关的菜单。**
+<img src="docs/screenshots/logo.png" alt="logo" height="110">
 
-RunEver 是一个 Windows 右键菜单启动器：它看你当前选中了什么（文本 / 文件 / 文件夹）、前台是什么程序，
-从你的条目库里筛出这一瞬该出现的那一小撮，拼成一棵**原生菜单**，点完即走。
+<h1>RunEver</h1>
 
-- 不常驻窗口、不做搜索面板、不接管文件管理 —— 它只回答一个问题：**「对这个东西、这个场景，我能做什么」**
-- 菜单是 Win32 原生 `TrackPopupMenu`：系统级图标、`&` 助记键、真子菜单，不自己画控件
-- 宿主 .NET Framework 4.8（`LangVersion 7.3`），**零第三方运行时依赖**；采集器是编译好的 AHK exe
+<p><strong>按一下热键，弹出一份只跟「此刻」有关的菜单。</strong></p>
 
-> 血统：从 [RunAny](https://github.com/hui-Zz/RunAny) 的思路出发重写 —— RunAny 用 AHK 单进程同时做采集/判定/菜单，
-> 采集中途卡死会连带整条热键链；RunEver 把**采集**留在 AHK（进程隔离），判定、执行、设置界面全部搬进 C#。
+[![GitHub Release](https://img.shields.io/github/v/release/c-dyang/runever?label=Release&color=blue&style=flat)](https://github.com/c-dyang/runever/releases)
+[![GitHub Stars](https://img.shields.io/github/stars/c-dyang/runever?logo=github&label=Stars&color=yellow&style=flat)](https://github.com/c-dyang/runever/stargazers)
+[![License](https://img.shields.io/badge/License-MIT-BD0000.svg?style=flat)](LICENSE)
+![.NET Framework](https://img.shields.io/badge/.NET-4.8-512BD4.svg?style=flat)
+![AHK](https://img.shields.io/badge/Capture-AutoHotkey%20v2-88B300.svg?style=flat)
 
----
+</div>
 
-## 下载即用
+选一个文件、一段文字、或者一个文件夹，按热键——RunEver 看你**选中了什么、前台是什么程序、在哪个目录**，
+从条目库里筛出这一瞬该出现的那一小撮，拼成一棵 **Win32 原生菜单**，点完即走。
 
-到 [Releases](https://github.com/c-dyang/runever/releases) 拿 `RunEver-20261108-full.zip`：
+> 它不回答「我能用什么工具」，只回答**「对这个东西、这个场景，我能做什么」**。
 
-1. 解压到任意目录（**别放在需要管理员权限的路径**，否则写不了 `state\`）
-2. 双击 `RunEverCs.exe` → 常驻托盘，默认热键 <kbd>`</kbd>
-3. 选一个文件 / 一段文字，按热键
+| 情境菜单 | 全库搜索 |
+|:---:|:---:|
+| <img src="docs/screenshots/menu.png" alt="情境菜单" width="250"> | <img src="docs/screenshots/fullsearch3.png" alt="全库搜索" width="430"> |
+| 选中文件 / 文本 / 空白处，菜单只给此刻相关的条目 | 菜单末项「全库搜索」→ 名称/拼音即时过滤全库条目 |
 
-包里自带 `config\menus.conf`（示例配置 + RunAny 内置搜索条目已合并）与 `配置说明.txt`。
+## ✨ 核心特性
 
-**系统要求**：Windows 10 / 11 + .NET Framework 4.8（系统自带）。Everything 可选（有则路径解析更快）。
-
----
+- **情境判定**：`ext / proc / folder / text` 多槽位组合——**同一个文件，在不同程序、不同目录下给不同菜单**
+- **原生菜单**：Win32 `TrackPopupMenu`——系统级图标、`&` 助记键、真子菜单，不自己画控件
+- **一键直达**：扩展名槽位只匹配到**唯一**可执行条目时直接执行，不弹菜单
+- **文件夹展开**：`open sub <目录>` 在渲染期枚举子项成子菜单，**绝不写回配置**
+- **全库搜索**：菜单末项 → 即时过滤全库有效条目（名称子串 + **拼音首字母/全拼**），Enter 直接执行
+- **图标全自动**：目标本身是网址的条目自动取站点 favicon；**条目图标不手填**
+- **插件系统**：AHK 插件 + 三层声明——**接管（intercept） / 命中派发 / 菜单追加（Menu=true）**
+- **零运行时依赖**：.NET Framework 4.8（系统自带）+ 编译好的 AHK 采集器，无安装器
+- **22 套无人值守自检**：判定 / 渲染 / 采集 / 插件 / 搜索 / 同步……全绿才算没坏
 
 ## 它怎么工作
 
@@ -34,7 +42,7 @@ RunEver 是一个 Windows 右键菜单启动器：它看你当前选中了什么
 热键
  └─ 采集（CaptureRunner.exe，AHK 常驻管道）
       → 选中文本 / 选中文件(夹) / 前台进程
-        └─ 判定（MatchEngine）
+        └─ 判定（MatchEngine：纯函数、零 IO）
              · 逐条比对分组规则 → 命中的组
              · 合成三个槽位：动态（含兜底） / 进程 / 固定
                └─ 渲染（Win32 TrackPopupMenu，图标 + 助记 + 子菜单）
@@ -51,8 +59,6 @@ RunEver 是一个 Windows 右键菜单启动器：它看你当前选中了什么
 
 顺序由 `auto.conf` 的 `menuOrder` 决定（默认 `dynamic,process,always`）。**某槽位当次为空就整块不出现** ——
 没选中东西又没配 `fallback` 时，「进程」自然排到第一位，这不是顺序失效。
-
----
 
 ## 配置
 
@@ -102,25 +108,15 @@ RunEver 是一个 Windows 右键菜单启动器：它看你当前选中了什么
 > 旧版曾有 `uiBackend`（win32/wpf）与 `captureBackend`（ahk/native）两个可切后端，**2026-11-08 起取消**：
 > 采集固定走 AHK 管道、菜单固定走 Win32。旧配置里留着这两行会被忽略，不报错。
 
----
+## 下载与安装
 
-## 命令行
+到 [**Releases**](https://github.com/c-dyang/runever/releases) 拿最新的 `RunEver-*.zip`（便携包，含本体 + 示例配置 + 转换资产）：
 
-```powershell
-RunEverCs.exe                     # 常驻托盘（默认）
-RunEverCs.exe --settings          # 打开设置窗口
-RunEverCs.exe --show-menu         # 弹一次菜单（不常驻）
-RunEverCs.exe --trigger           # 走完整链路（采集 → 判定 → 菜单）
-RunEverCs.exe --refresh-cache     # 重建路径缓存
-RunEverCs.exe --selfcheck         # 全盘自检：配置里的程序本机有没有
-RunEverCs.exe --sync              # WebDAV 同步一次
-RunEverCs.exe --dump-autostart    # 看开机自启项（注册表值 + 解析结果 + 是否指向自己）
-```
+1. 解压到任意目录（**别放在需要管理员权限的路径**，否则写不了 `state\`）
+2. 双击 `RunEverCs.exe` → 常驻托盘，默认热键 <kbd>`</kbd>
+3. 选一个文件 / 一段文字，按热键
 
-调试用：`--dump-parser`（解析结果）· `--dump-order`（判定后真实组序，可配 `--ctx=text|file:pdf|folder|proc:QQ.exe`）·
-`--dump-menutext`（菜单文本与助记）· `--ev-probe`（Everything 探针）。
-
----
+**系统要求**：Windows 10 / 11 + .NET Framework 4.8（系统自带）。Everything 可选（有则路径解析更快）。
 
 ## 从源码构建
 
@@ -132,50 +128,44 @@ dotnet build cs\RunEverCs.csproj -c Release
 ```
 
 不需要 Visual Studio，`dotnet build` 即可（net48 走系统自带的 .NET Framework 编译器链）。
-运行时依赖的 DLL（`Everything64.dll` / `ControlzEx.dll` / `MahApps.Metro.dll` / `Microsoft.Xaml.Behaviors.dll`）
-与采集器 `CaptureRunner.exe` 在 Releases 包里；源码树里的 `dist\` 不入库。
-
----
+运行时依赖（`Everything64.dll` / `ControlzEx.dll` / `MahApps.Metro.dll` / `Microsoft.Xaml.Behaviors.dll` /
+`ChnCharInfo.dll`）+ 采集器 `CaptureRunner.exe` 都在 Releases 包里；源码树里的 `dist\` 不入库。
+发布时 **`ChnCharInfo.dll` 必须与 `RunEverCs.exe` 同目录**（全库搜索的拼音匹配用；缺了降级为子串匹配，不会崩）。
 
 ## 自检
 
-19 套无人值守自检，一键跑：
+22 套无人值守自检，一键跑：
 
 ```powershell
 pwsh -File .\run-selftests.ps1 -Exe "cs\bin\Release\RunEverCs.exe" -OutDir state\selftest
 ```
 
-单套：`RunEverCs.exe --selftest <root> <out.txt>`、`--selftest-menueditor`、`--selftest-menu` …
+单套：`RunEverCs.exe --selftest <root> <out.txt>`、`--selftest-search`、`--selftest-iconurl`、`--selftest-menu` …
 
 覆盖：解析器 / 写回器 / 模板 / 插件编辑 / 路径缓存 / 判定匹配 / 隐藏规则 / 自动执行 / 执行器 / 采集链 /
-WebDAV / 配置写回 / 热重载 / 目录选择 / 菜单编辑页（结构操作、拖放、搜索） / 菜单渲染 / 自检自身。
+WebDAV / 配置写回 / 热重载 / 目录选择 / 菜单编辑页 / 菜单渲染 / URL 图标 / 插件三形态 / 全库搜索 / 自检自身。
 
-每次改完必须跑；**19 套全绿才算没坏**（`bootstrap`、`selfcheck` 两条曾长期红，是断言口径问题，已修正）。
-
----
+每次改完必须跑；**22 套全绿才算没坏**。
 
 ## 边界（它有意不做的事）
 
-- **不做搜索**：找文件用 Everything / Listary；RunEver 是"对这个东西能做什么"的动词层
-- **不做多选、不做常驻面板、不做 Dock**
-- **单一后端**：菜单只有 Win32 一份实现（WPF 只用于设置窗口），采集只有 AHK 一份
+- **不做文件搜索**：找文件用 Everything / Listary；RunEver 是「对这个东西能做什么」的动词层
+- **不做常驻面板、不做 Dock、不做多窗口**
+- **单一后端**：菜单只有 Win32 一份实现（WPF 只用于设置窗口与全库搜索窗口），采集只有 AHK 一份
 - **不擅自改你的系统**：开机自启只在你点菜单时才写注册表，且只写 `HKCU\...\Run` 里自己那一项
-
----
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `cs/` | C# 主体：判定、Win32 菜单、执行器、设置窗口、自检 |
+| `cs/` | C# 主体：判定、Win32 菜单、执行器、设置窗口、全库搜索、自检 |
 | `src/` | AHK 原版（历史对照，不是主链） |
 | `config/` | `menus.conf`（菜单）、`auto.conf`（参数）、`functions/`（插件脚本） |
 | `templates/` | 首次运行生成配置用的模板 |
-| `docs/` | 架构契约（菜单语义 / 不变量 / 配置字段）、EV 后端、parity 审计 |
+| `docs/` | 架构契约、EV 后端、parity 审计、`screenshots/`（README 配图） |
+| `lib/` | 构建用第三方库（`ChnCharInfo.dll`，全库搜索拼音） |
 | `release-src/` | 发版辅助：RunAny / Quicker 配置转换 |
-| `run-selftests.ps1` | 19 套自检一键跑 |
-
----
+| `run-selftests.ps1` | 22 套自检一键跑 |
 
 ## 说明
 

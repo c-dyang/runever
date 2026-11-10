@@ -410,17 +410,22 @@ namespace RunEverCs
                 + " proc=[" + ctx.Proc + "]");
             long tCapture = swTotal.ElapsedMilliseconds;
 
-            // ★ 1.5 步 自动执行（匹配块）：选中文本命中插件 → 直接派发，跳过弹菜单
+            // ★ 1.5 步 自动执行（匹配块）：选中文本命中插件 → 按插件声明的形态定档
             //   对照 AHK `RunEver.ahk:564-577`。
+            //   L1 intercept → 插件已接管（自己不建菜单） ／ L2 → 已派发；
+            //   两者都跳过弹菜单。L3（menu=true）在这里返回 None，改走菜单追加。
             //   ★★ 必须复用【同一次采集结果】ctx —— WaitCapture 是一次性语义，
             //      再调一次会实时重采 ⇒ 菜单与自动执行看到不同上下文。
-            //   三层兜底（AHK :624-627）：无命中 / 产出空 target / 派发异常
+            //   三层兜底（AHK :624-627）：无命中 / 产出空 target / 派发或接管失败
             //      → 一律回落到下面的正常链路（零回归）。
             try
             {
-                if (TryAutoExec(ctx))
+                var tier = ResolveAutoTier(ctx);
+                if (tier != AutoTier.None)
                 {
-                    Log("自动执行命中 → 已派发，跳过弹菜单");
+                    Log(tier == AutoTier.Intercept
+                        ? "接管命中 → 插件已接管，跳过弹菜单"
+                        : "自动执行命中 → 已派发，跳过弹菜单");
                     Log("菜单流程总耗时(不含用户等待) = "
                         + swTotal.ElapsedMilliseconds + "ms（自动执行）");
                     return 0;             // 0 = 未弹菜单（与"用户没选"同语义）
@@ -495,6 +500,20 @@ namespace RunEverCs
                 return 0;
             }
 
+            // ★ L3 菜单追加（2026-11-10）：RVE_FN_Menu := true 的插件 → always 段末尾。
+            //   放在一键直达之后：直达命中时本来就不弹菜单，追加无意义。
+            //   异常只记日志（插件元数据问题绝不能把核心菜单打空）。
+            try
+            {
+                int pluginItems = AppendPluginMenuItems(groups, ctx);
+                if (pluginItems > 0)
+                    Log("插件菜单项: " + pluginItems + "（追加到 always 段末尾）");
+            }
+            catch (Exception ex)
+            {
+                Log("插件菜单追加异常（忽略，核心菜单照常）: " + ex.Message);
+            }
+
             // 图标解析
             _icons.ResolveAll(groups);
             long tIcon = swTotal.ElapsedMilliseconds;
@@ -543,9 +562,22 @@ namespace RunEverCs
 
                 NotifyUser("菜单是空的",
                     "菜单里没有可显示的条目 —— 可能被『隐藏本机没有的条目』全部隐藏了，"
-                    + "可在 设置 → 触发与行为 关掉它");
+                    + "可在 设置 → 触发与行为 关掉它；菜单末尾的『全库搜索』仍可用");
 
                 built.Menu.AddItemDisabled("（没有可显示的条目）");
+            }
+
+            // ★ S1（2026-11-10）：末尾固定项「全库搜索」—— 虚拟项，不进 IdMap / 不参与任何过滤。
+            //   放在"全空菜单占位项"之后 ⇒ 它永远是最后一项（用户定案的位置）。
+            int fixedId = MenuBuilder.AppendFullSearch(built);
+            if (fixedId > 0)
+            {
+                Log("固定项: " + MenuBuilder.FullSearchTitle + "（顶层末尾，虚拟 id=" + fixedId
+                    + " 图标=" + MenuBuilder.FullSearchIcon + "）");
+            }
+            else
+            {
+                Log("⚠ 固定项追加失败：菜单里不会有『" + MenuBuilder.FullSearchTitle + "』");
             }
 
             int selId = 0;
@@ -572,14 +604,21 @@ namespace RunEverCs
             }
             Log("用户选择 ID = " + selId + "（等待 " + (swTotal.ElapsedMilliseconds - tBuild) + "ms）");
 
-            if (selId > 0 && built.IdMap.ContainsKey(selId))
+            // ★ 分流：虚拟固定项 → 全库搜索；普通条目 → Executor（原路径）。
+            //   判据收在 ClassifyPick 一处（自检直接断言这张表）。
+            var pick = ClassifyPick(selId, built);
+            if (pick == MenuPick.FullSearch)
+            {
+                OpenFullSearch(ctx);
+            }
+            else if (pick == MenuPick.Execute)
             {
                 var item = built.IdMap[selId];
                 Log("点击: " + item.Title + " | " + item.Type.ToString().ToLowerInvariant()
                     + " " + item.Target);
                 Dispatch(item, ctx);
             }
-            else if (selId > 0)
+            else if (pick == MenuPick.Unknown)
             {
                 // ★ ID 找不到 = 分配冲突（历史 bug：点任何项都弹计算器）
                 Log("⚠ 选择 ID=" + selId + " 在 idmap 中不存在！"
@@ -792,9 +831,45 @@ namespace RunEverCs
         // ============================================================
         // 派发到执行器
         // ============================================================
-        public void Dispatch(MenuItem item, Context ctx)
+
+        /// <summary>菜单点击的去向（`ShowMenuFlow` 的唯一分流判据）。</summary>
+        public enum MenuPick
         {
-            var t = new Executor.Task
+            /// <summary>没有选中（取消 / 点了外面）。</summary>
+            None = 0,
+
+            /// <summary>普通条目 ⇒ 走 <see cref="Dispatch"/>（Executor）。</summary>
+            Execute = 1,
+
+            /// <summary>虚拟固定项「全库搜索」⇒ 打开搜索窗口。</summary>
+            FullSearch = 2,
+
+            /// <summary>有 ID 但 IdMap 里没有 ⇒ 分配冲突（只有告警，不许瞎派发）。</summary>
+            Unknown = 3
+        }
+
+        /// <summary>
+        /// 选择 ID → 去向。**先判虚拟固定项、再查 IdMap**：固定项刻意不进 IdMap
+        /// （不可编辑/删除），顺序反了就会掉进"ID 不存在"的告警分支。
+        /// </summary>
+        public static MenuPick ClassifyPick(int selId, MenuBuilder.BuildResult built)
+        {
+            if (selId <= 0 || built == null) return MenuPick.None;
+            if (built.FixedSearchId != 0 && selId == built.FixedSearchId) return MenuPick.FullSearch;
+            if (built.IdMap != null && built.IdMap.ContainsKey(selId)) return MenuPick.Execute;
+            return MenuPick.Unknown;
+        }
+
+        /// <summary>
+        /// 菜单点击的**执行载荷**（纯映射、无副作用）—— 菜单与全库搜索共用这一份。
+        /// ★ 抽出来是给自检留的接缝：两条入口只要构造出同一个 Task，执行语义就完全相同
+        ///   （不必真启动任何程序）。
+        /// </summary>
+        public static Executor.Task BuildDispatchTask(MenuItem item, Context ctx, Action<string> log)
+        {
+            if (item == null) return null;
+            if (ctx == null) ctx = new Context();
+            return new Executor.Task
             {
                 Type = item.Type.ToString().ToLowerInvariant(),
                 Target = item.Target,
@@ -804,8 +879,14 @@ namespace RunEverCs
                 Proc = ctx.Proc ?? "",
                 WinTitle = ctx.WinTitle ?? "",
                 Clipboard = ctx.Clipboard ?? "",
-                Log = s => Log("  " + s)
+                Log = log
             };
+        }
+
+        public void Dispatch(MenuItem item, Context ctx)
+        {
+            var t = BuildDispatchTask(item, ctx, s => Log("  " + s));
+            if (t == null) return;
             try
             {
                 // ★ I-5：现查分支整体移交 worker（消息线程不 task.Wait）—— 见 DispatchOnWorkerIfNeeded
@@ -818,62 +899,204 @@ namespace RunEverCs
             }
         }
 
-        // ============================================================
-        // ★ 自动执行（匹配块）· 2026-10-03 定案，对照 AHK `RunEver.ahk:618-673`
-        //
-        // 流程：选中文本 → 匹配插件 → 产出目标 → 复用执行器派发
-        // 返回：true = 已派发（调用方应跳过弹菜单）；false = 未命中/放弃（走正常链路）
-        //
-        // ★ 三层兜底（AHK `:624-627`，一条都不能少）：
-        //   ① 无规则命中      → false → 弹菜单
-        //   ② 脚本产出空 target → false → 弹菜单
-        //   ③ 派发失败/异常    → false → 弹菜单（异常吞掉并记日志）
-        // ============================================================
-        public bool TryAutoExec(Context ctx)
+        /// <summary>
+        /// 「全库搜索」入口 —— 虚拟固定项被点中时调用（S1，2026-11-10）。
+        ///
+        /// 口径：
+        ///   · 数据源 = **全库条目**（跨分组），过滤器与菜单完全同一份
+        ///     （`InjectEntryResolved` + `MatchEngine.FilterMissing`，见 FullSearchModel）；
+        ///   · `hideMissing` 用**本轮热键流程**取到的那份值（与刚才那份菜单同一个快照）；
+        ///   · 窗口懒创建、关闭即释放（`FullSearchWindow.ShowPicker`）；
+        ///   · 选中 ⇒ 同一个 `Dispatch`（执行语义 = 菜单点击）；取消 ⇒ 什么都不做。
+        ///   · 只读：不写回 conf、不触发保存校验闸（唯一落盘是 state\ 的窗口尺寸）。
+        /// </summary>
+        private void OpenFullSearch(Context ctx)
         {
-            if (_autoMatcher == null) return false;
-
-            string text = (ctx != null && ctx.Text != null)
-                ? ctx.Text.Trim(' ', '\t', '\r', '\n') : "";
-            if (text.Length == 0) return false;
-
-            // 缓存过期才真扫插件目录（热键路径零多余 IO —— 见 AutoMatcher.Load）
-            _autoMatcher.Load(false);
-
-            // ---- 匹配 ----
-            var r = _autoMatcher.Match(text);
-            if (!r.Hit) return false;                       // 兜底①
-
-            string target = r.Target;
-
-            // ---- 形态 B：无 Tpl ⇒ 由插件脚本产出目标 ----
-            if (string.IsNullOrEmpty(target))
-            {
-                target = (_pluginRunner != null) ? _pluginRunner.Run(r.Plugin, text) : "";
-                if (string.IsNullOrEmpty(target))
-                {
-                    Log("  自动执行: 插件 " + r.Plugin.Name + " 未产出目标 → 回落弹菜单");
-                    return false;                           // 兜底②
-                }
-            }
-
-            Log("  自动执行命中: " + r.Plugin.Name + " (prio=" + r.Plugin.Prio + ") out=" + r.Out
-                + " target=" + (target.Length > 60 ? target.Substring(0, 60) + "..." : target));
-
-            // ---- 派发：复用执行器任务契约（对照 AHK 里的 item Map）----
             try
             {
-                if (!DispatchAuto(r, target, ctx))
+                var groups = (_parser != null) ? _parser.Groups : null;
+
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var data = RunEverCs.Views.FullSearchModel.Build(groups, _cache, _liveHideMissing,
+                    _liveMenuOrder, s => Log("  " + s));
+                Log("全库搜索: 分组=" + data.SectionCount + " 条目=" + data.ItemCount
+                    + " hideMissing=" + (_liveHideMissing ? 1 : 0)
+                    + "（构建 " + sw.ElapsedMilliseconds + "ms）");
+
+                var picked = RunEverCs.Views.FullSearchWindow.ShowPicker(data, Root);
+                if (picked == null)
                 {
-                    Log("  自动执行派发失败（回落弹菜单）");
-                    return false;                           // 兜底③
+                    Log("全库搜索: 取消（未选择）");
+                    return;
                 }
-                return true;
+
+                Log("全库搜索选择: " + picked.Title + " | "
+                    + picked.Type.ToString().ToLowerInvariant() + " " + picked.Target);
+                Dispatch(picked, ctx);
             }
             catch (Exception ex)
             {
-                Log("  自动执行派发失败（回落弹菜单）: " + ex.Message);
-                return false;                               // 兜底③
+                // 绝不静默：点开一片空白 = 用户无法理解（AC-5 的"禁静默失败"）
+                Log("全库搜索失败: " + ex.Message);
+                NotifyUser("全库搜索打不开", "全库搜索窗口打开失败：" + ex.Message);
+            }
+        }
+
+        // ============================================================
+        // ★ 自动执行（匹配块）· 2026-10-03 定案，对照 AHK `RunEver.ahk:618-673`
+        //
+        // 流程：选中文本 → 匹配插件 → 按插件声明的形态定档（声明即定档，核心不仲裁）
+        // 返回：None = 未命中/放弃（走正常菜单链路）；Dispatch / Intercept = 已处理
+        //
+        // ★ 三层权限（2026-11-10 定案）：
+        //   L1 intercept → 调插件 Run(text)，插件自己弹菜单；核心**不建 NativeMenu、
+        //      不派发、不追加**。Run 返回非空 = 接管成功；空串/异常/超时 ⇒ 回落弹菜单。
+        //   L2 六种产出 → 命中即派发、跳过弹菜单（原行为不动）。
+        //   L3 menu=true → **不自动派发**，改由 `AppendPluginMenuItems` 追加进菜单。
+        //   ★ 互斥：intercept + menu 冲突 ⇒ intercept 优先（menu 忽略）。
+        //
+        // ★ 三层兜底（AHK `:624-627`，一条都不能少）：
+        //   ① 无规则命中      → None → 弹菜单
+        //   ② 脚本产出空 target → None → 弹菜单（含 intercept 接管失败）
+        //   ③ 派发失败/异常    → None → 弹菜单（异常吞掉并记日志）
+        // ============================================================
+
+        /// <summary>一次自动执行的处理结论（决定调用方是否还要弹菜单）。</summary>
+        public enum AutoTier
+        {
+            /// <summary>未命中 / 放弃 / 接管失败 ⇒ 继续走正常菜单链路。</summary>
+            None = 0,
+
+            /// <summary>L2：已派发（调用方应跳过弹菜单）。</summary>
+            Dispatch = 1,
+
+            /// <summary>L1：插件已接管（其 Run 内自行弹菜单；核心跳过，不建 NativeMenu）。</summary>
+            Intercept = 2
+        }
+
+        /// <summary>
+        /// intercept（L1）插件的等待上限（ms）。
+        /// ★ 为什么比形态 B 的 3000 长：接管插件在 Run(text) 里是**弹自己的菜单并等用户选**，
+        ///   3 秒红线会把手慢的用户直接判失败；但仍必须有界 —— 插件挂死不能拖死热键。
+        ///   超时 ⇒ 杀进程 + 回落核心菜单（与 L2 失败同原则）。
+        /// </summary>
+        public const int InterceptTimeoutMs = 8000;
+
+        /// <summary>
+        /// 兼容入口：true = 已处理（已派发或已接管），调用方跳过弹菜单。
+        /// ★ 这里保留"空文本提前返回"这一条**显式**拦截（而不是只靠
+        ///   <see cref="ResolveAutoTier"/> 内部的同名判断）：它是 auto.conf 类型 i
+        ///   （enabled/minLen/showByDefault/cacheSeconds）**必须有选中文本才消费**
+        ///   的结构证据 —— HotReloadSelfTest C8 按源码形态断言它（勿删，勿只搬进下层）。
+        /// </summary>
+        public bool TryAutoExec(Context ctx)
+        {
+            string text = (ctx != null && ctx.Text != null)
+                ? ctx.Text.Trim(' ', '\t', '\r', '\n') : "";
+            if (text.Length == 0) return false;
+            return ResolveAutoTier(ctx) != AutoTier.None;
+        }
+
+        /// <summary>
+        /// 自动执行的分档判定 + 执行（见上方三层权限）。永不抛异常。
+        /// </summary>
+        public AutoTier ResolveAutoTier(Context ctx)
+        {
+            if (_autoMatcher == null) return AutoTier.None;
+
+            string text = (ctx != null && ctx.Text != null)
+                ? ctx.Text.Trim(' ', '\t', '\r', '\n') : "";
+            if (text.Length == 0) return AutoTier.None;
+
+            try
+            {
+                // 缓存过期才真扫插件目录（热键路径零多余 IO —— 见 AutoMatcher.Load）
+                _autoMatcher.Load(false);
+
+                // ---- 匹配 ----
+                var r = _autoMatcher.Match(text);
+                if (!r.Hit) return AutoTier.None;                   // 兜底①
+
+                string outType = (r.Out ?? "").Trim().ToLowerInvariant();
+
+                // ---- L1 接管：插件自己弹菜单，核心只负责"跳过" ----
+                if (outType == "intercept")
+                {
+                    string ack = RunIntercept(r.Plugin, text);
+                    if (string.IsNullOrEmpty(ack))
+                    {
+                        Log("  接管失败: 插件 " + r.Plugin.Name + " 未确认接管 → 回落弹菜单");
+                        return AutoTier.None;                       // 兜底②
+                    }
+                    Log("  接管命中: " + r.Plugin.Name + " (prio=" + r.Plugin.Prio
+                        + ") ack=" + (ack.Length > 40 ? ack.Substring(0, 40) + "..." : ack));
+                    return AutoTier.Intercept;
+                }
+
+                // ---- L3 互斥：menu=true ⇒ 进菜单，不自动派发 ----
+                if (r.Plugin.Menu)
+                {
+                    Log("  菜单插件（menu=true）: " + r.Plugin.Name + " → 不自动派发，改由菜单项触发");
+                    return AutoTier.None;
+                }
+
+                // ---- L2 派发 ----
+                string target = r.Target;
+
+                // 形态 B：无 Tpl ⇒ 由插件脚本产出目标
+                if (string.IsNullOrEmpty(target))
+                {
+                    target = (_pluginRunner != null) ? _pluginRunner.Run(r.Plugin, text) : "";
+                    if (string.IsNullOrEmpty(target))
+                    {
+                        Log("  自动执行: 插件 " + r.Plugin.Name + " 未产出目标 → 回落弹菜单");
+                        return AutoTier.None;                       // 兜底②
+                    }
+                }
+
+                Log("  自动执行命中: " + r.Plugin.Name + " (prio=" + r.Plugin.Prio + ") out=" + r.Out
+                    + " target=" + (target.Length > 60 ? target.Substring(0, 60) + "..." : target));
+
+                if (!DispatchAuto(r, target, ctx))
+                {
+                    Log("  自动执行派发失败（回落弹菜单）");
+                    return AutoTier.None;                           // 兜底③
+                }
+                return AutoTier.Dispatch;
+            }
+            catch (Exception ex)
+            {
+                // ★ 异常必须吞掉并记日志：自动执行绝不能炸掉热键
+                //   （否则用户表现为"按了热键没反应"，排查成本极高）
+                Log("  自动执行异常（回落弹菜单）: " + ex.Message);
+                return AutoTier.None;                               // 兜底③
+            }
+        }
+
+        /// <summary>
+        /// L1 接管：跑插件 Run(text)（插件进程内自行弹菜单），返回其确认串。
+        /// ★ 成功判据 = Run 返回**非空**（约定返回 "ok" 之类的一行），
+        ///   空串 / 异常 / 超时 ⇒ 接管失败（调用方回落核心菜单）。
+        /// ★ 超时按 <see cref="InterceptTimeoutMs"/> 临时放宽，跑完立即还原 ——
+        ///   PluginRunner 是共享实例，不能把长超时留给 L2 派发。
+        /// </summary>
+        private string RunIntercept(PluginInfo p, string text)
+        {
+            if (_pluginRunner == null) return "";
+            int oldTimeout = _pluginRunner.TimeoutMs;
+            try
+            {
+                _pluginRunner.TimeoutMs = InterceptTimeoutMs;
+                return _pluginRunner.Run(p, text) ?? "";
+            }
+            catch (Exception ex)
+            {
+                Log("  接管插件异常: " + ex.Message);
+                return "";
+            }
+            finally
+            {
+                _pluginRunner.TimeoutMs = oldTimeout;
             }
         }
 
@@ -909,6 +1132,89 @@ namespace RunEverCs
             };
             if (DispatchOnWorkerIfNeeded(t)) return true;   // 已受理（现查 + 启动在 worker 上）
             return _executor.Execute(t);
+        }
+
+        // ============================================================
+        // ★ L3 菜单追加（2026-11-10 定案）：RVE_FN_Menu := true 的插件
+        //
+        // 位置：**always 段末尾**（插在最后一个 always 组之后；不进 dynamic/process 槽位，
+        //   因此不碰 I-1 动态槽位互斥）。没有 always 组时追加到列表末尾。
+        // 条目：标题 = RVE_FN_Name；无快捷键；动作 = RVE_FN_Out；目标 = RVE_FN_Tpl
+        //   （{0} 代入**弹出菜单时**的选中文本，无选中 ⇒ 空）。
+        // 点击：条目进 idmap → 走与核心条目**同一条** `Dispatch`（Executor）路径。
+        //
+        // ★ 为什么不把条目并进已有的 always 组：那些 MenuGroup 是 ConfParser 的解析产物，
+        //   就地 Add 会污染配置对象（下次弹菜单会重复追加）。
+        // ★ 为什么单独成一个组：组间分隔线让"插件产出"与核心条目一眼可分，且组名不进菜单
+        //   （BuildMenu 平铺，不显示分组名）。
+        // ★ 互斥：intercept 优先 —— `Out="intercept"` 且 `Menu=true` 的插件**不进菜单**。
+        //
+        // 返回追加的条目数（0 = 没有菜单插件）。
+        // ============================================================
+        public int AppendPluginMenuItems(List<MenuGroup> groups, Context ctx)
+        {
+            if (groups == null || _autoMatcher == null) return 0;
+
+            // 插件清单可能尚未加载（无选中文本时 ResolveAutoTier 提前返回）——
+            // 这里补一次：命中缓存时只读一份几百字节的 auto.conf，不重扫目录。
+            _autoMatcher.Load(false);
+
+            string text = (ctx != null && ctx.Text != null)
+                ? ctx.Text.Trim(' ', '\t', '\r', '\n') : "";
+
+            var items = new List<MenuItem>();
+            foreach (var p in _autoMatcher.Plugins)
+            {
+                if (p == null || !p.Enabled || !p.Menu) continue;
+
+                string outType = (p.Out ?? "").Trim().ToLowerInvariant();
+                if (outType == "intercept") continue;      // ★ 互斥：intercept 优先，Menu 忽略
+
+                ActionType type;
+                if (!TryOutToActionType(outType, out type)) continue;   // 加载期已校验；防御
+
+                items.Add(new MenuItem
+                {
+                    Title = p.Name,
+                    Hotkey = "",
+                    Type = type,
+                    Target = string.IsNullOrEmpty(p.Tpl) ? "" : p.Tpl.Replace("{0}", text),
+                    Level = 1,
+                    IconSource = ""
+                });
+            }
+            if (items.Count == 0) return 0;
+
+            var pluginGroup = new MenuGroup
+            {
+                Name = "插件",
+                Type = GroupType.Always,
+                Items = items
+            };
+
+            int insertAt = -1;
+            for (int i = 0; i < groups.Count; i++)
+                if (groups[i] != null && groups[i].Type == GroupType.Always) insertAt = i;
+
+            if (insertAt < 0) groups.Add(pluginGroup);
+            else groups.Insert(insertAt + 1, pluginGroup);
+
+            return items.Count;
+        }
+
+        /// <summary>产出形态文本 → 菜单动作类型（`intercept` 不是可点动作，返回 false）。</summary>
+        private static bool TryOutToActionType(string outType, out ActionType type)
+        {
+            switch ((outType ?? "").Trim().ToLowerInvariant())
+            {
+                case "run": type = ActionType.Run; return true;
+                case "open": type = ActionType.Open; return true;
+                case "url": type = ActionType.Url; return true;
+                case "action": type = ActionType.Action; return true;
+                case "send": type = ActionType.Send; return true;
+                case "keys": type = ActionType.Keys; return true;
+                default: type = ActionType.Group; return false;
+            }
         }
 
         // ============================================================

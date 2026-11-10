@@ -39,12 +39,20 @@
 ;                                            ;   动作类型之一（见下方 OutTypes）
 ;   global RVE_FN_Tpl   := "https://...{0}"  ; 形态A必需 · 模板，{0}=选中文本
 ;   global RVE_FN_Icon  := "chrome.exe"      ; 可选 · 图标源
-;   global RVE_FN_Menu  := false             ; 可选 · 是否同时进菜单（本轮预留）
+;   global RVE_FN_Menu  := false             ; 可选 · L3：true = 作为菜单项追加进核心菜单
+;                                            ;   （always 段末尾；且不自动派发）
 ;   global RVE_FN_Arg   := "text"            ; 可选 · 传参：text/file/clip
 ;   global RVE_FN_Show  := true              ; 可选 · 显示执行窗口（命令行工具用）
 ;                                            ;   不写 = 继承 auto.conf 的 showByDefault（默认隐藏）
 ;                                             ;   ★ 看进度/输出的命令（choco/ffmpeg/git）必须写 true
 ;   global RVE_FN_Enabled := true            ; 可选 · 启用开关（设置 UI 勾选用）
+;
+; ★ 三层权限（2026-11-10 定案，声明即定档，核心不仲裁）：
+;   L1 接管  Out="intercept"：命中后核心不建菜单/不派发/不追加，插件自己弹菜单；
+;            Run(text) 返回非空 = 接管成功；空 / 异常 / 超时 ⇒ 回落核心菜单
+;   L2 派发  Out ∈ run/open/url/action/send/keys：命中后直接派发、跳过弹菜单
+;   L3 菜单  Menu=true：不自动派发，作为菜单项追加进 always 段末尾
+;   ★ 互斥：intercept + Menu 冲突 ⇒ intercept 优先（Menu 忽略）
 ;
 ; 用法：
 ;   am := AutoMatcher(RVE_ROOT)
@@ -63,9 +71,11 @@ class AutoMatcher {
     ;      action 走 cmd /c 执行命令   ← ★ 不是 "cmd"！
     ;      send   发送文本
     ;      keys   发按键
+    ;      ★ 2026-11-10 新增 intercept = L1 接管：插件自己弹菜单，核心跳过
+    ;        （它不是执行器动作类型，只由 RunEver.TryAutoExec 消费）
     ;    ★ 曾把 cmd 型插件写成 out="cmd"，执行器报「未知动作类型: cmd」
     ;      ⇒ 产出为空 → 用户看到失败小菜单。这里加白名单，加载期就拦住。
-    static OutTypes := ["run", "open", "url", "action", "send", "keys"]
+    static OutTypes := ["run", "open", "url", "action", "send", "keys", "intercept"]
 
     __New(root) {
         this.Root        := root
@@ -639,7 +649,59 @@ class AutoMatcher {
         return this.RegistryPath
     }
 
-    ; ---- 调试输出 ----
+    ; ============================================================
+    ; ★ L3 菜单追加（2026-11-10 定案）：RVE_FN_Menu := true 的插件
+    ;
+    ; 位置：always 段末尾（插在最后一个 always 组之后；不进 dynamic/process 槽位，
+    ;   不碰选中类槽位互斥）。没有 always 组 ⇒ 追加到列表末尾。
+    ; 条目：标题 = 插件名；无快捷键；动作 = Out；目标 = Tpl（{0} = 弹出时选中文本，无则空）。
+    ; 点击：与核心条目走同一条 OnItemClick（任务文件 → 执行器）。
+    ; ★ 单独成组：组间分隔线让插件产出与核心条目可分；组名不进菜单（BuildMenu 平铺）。
+    ; ★ 互斥：intercept 优先 —— Out="intercept" 且 Menu=true 的插件不进菜单。
+    ; 返回追加的条目数（0 = 没有菜单插件）。
+    ; ============================================================
+    AppendMenuItems(groups, text) {
+        if (!IsObject(groups))
+            return 0
+
+        ; 插件清单可能尚未加载（无选中文本时 TryAutoExec 提前返回）——补一次
+        try this.Load(false)
+
+        vText := Trim(text, " `t`r`n")
+        vItems := []
+        for p in this.Plugins {
+            if (!p["enabled"] || !p["menu"])
+                continue
+            if (p["out"] = "intercept")          ; ★ 互斥：intercept 优先，Menu 忽略
+                continue
+            vTarget := (p["tpl"] != "") ? StrReplace(p["tpl"], "{0}", vText) : ""
+            vItems.Push(Map(
+                "title",  p["name"],
+                "hotkey", "",
+                "type",   p["out"],
+                "target", vTarget,
+                "level",  1
+            ))
+        }
+        if (vItems.Length = 0)
+            return 0
+
+        vGrp := Map("name", "插件", "type", "always", "kw", [], "items", vItems, "line", 0)
+
+        vIdx := 0
+        for i, g in groups {
+            if (g["type"] = "always")
+                vIdx := i
+        }
+        if (vIdx > 0)
+            groups.InsertAt(vIdx + 1, vGrp)
+        else
+            groups.Push(vGrp)
+
+        return vItems.Length
+    }
+
+    ; ---- 调试输出（对照 AHK `Dump`）—— 设置页/自检用 ----
     Dump() {
         vS := "自动执行: enabled=" (this.Enabled ? "1" : "0")
             . " minLen=" this.MinLen " cache=" this.CacheSec "s"

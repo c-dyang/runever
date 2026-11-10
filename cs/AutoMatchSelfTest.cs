@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using RunEverCs.Models;
 using RunEverCs.Services;
 
 namespace RunEverCs
@@ -51,6 +52,9 @@ namespace RunEverCs
 
             // ---- 5. 1.5 步早退 + 三层兜底（RunEverApp.TryAutoExec）----
             StepCases();
+
+            // ---- 5b. 三层权限：L1 接管 / L2 派发 / L3 菜单 + 互斥（2026-11-10）----
+            TierCases();
 
             // ---- 6. 实机 root（AHK 自检口径）----
             RealRootCases(root);
@@ -487,6 +491,16 @@ namespace RunEverCs
         private static void WriteFormB(string root, string file, string name, string match,
             string body, string outType = "url")
         {
+            WriteTierPlugin(root, file, name, match, outType, null, false, body);
+        }
+
+        /// <summary>
+        /// 写一个可声明 RVE_FN_Menu 的插件（形态 A 给 tpl；形态 B 给 body）。
+        /// <paramref name="body"/> 为 null ⇒ 纯元数据（形态 A）。
+        /// </summary>
+        private static void WriteTierPlugin(string root, string file, string name, string match,
+            string outType, string tpl, bool menu, string body)
+        {
             var sb = new StringBuilder();
             sb.AppendLine("#Requires AutoHotkey v2.0");
             sb.AppendLine("global RVE_FN_Name  := \"" + name + "\"");
@@ -494,10 +508,130 @@ namespace RunEverCs
             sb.AppendLine("global RVE_FN_Whole := true");
             sb.AppendLine("global RVE_FN_Prio  := 100");
             sb.AppendLine("global RVE_FN_Out   := \"" + outType + "\"");
-            sb.AppendLine("; ===== 形态 B：无 RVE_FN_Tpl，目标由 Run(text) 产出 =====");
-            sb.Append(body);
+            if (tpl != null)
+                sb.AppendLine("global RVE_FN_Tpl   := \"" + tpl + "\"");
+            if (menu)
+                sb.AppendLine("global RVE_FN_Menu  := true");
+            if (body != null)
+            {
+                sb.AppendLine("; ===== 形态 B：目标/接管由 Run(text) 处理 =====");
+                sb.Append(body);
+            }
             File.WriteAllText(Path.Combine(root, "config", "functions", file),
                 sb.ToString(), new UTF8Encoding(false));
+        }
+
+        // ============================================================
+        // 5b. 三层权限（2026-11-10 定案）：声明即定档，核心不仲裁
+        //   L1 intercept：命中 ⇒ 核心不建 NativeMenu / 不派发 / 不追加；
+        //                 Run 返回非空 = 接管成功，空 = 回落弹菜单
+        //   L2 六种产出  ：命中 ⇒ 直接派发
+        //   L3 menu=true ：不自动派发，追加到 always 段末尾（不进 dynamic/process 槽位）
+        //   ★ 互斥：menu + intercept 同时声明 ⇒ intercept 优先（menu 忽略）
+        //
+        // ★ "不建 NativeMenu" 的断言口径：ResolveAutoTier 返回 Intercept 后，
+        //   ShowMenuFlow 在其后**立即 return**（`cs\RunEverApp.cs` 1.5 步分支），
+        //   判定/渲染/图标三段全不进入 ⇒ 这里断言分档结论 + 菜单追加函数不收录该插件。
+        // ============================================================
+        private static void TierCases()
+        {
+            _sb.AppendLine("--- 5b. 三层权限（L1 接管 / L2 派发 / L3 菜单）---");
+            string root = MakeSandbox("tier");
+            try
+            {
+                WriteMenusConf(root);
+                var app = new RunEverApp(root);
+                if (!app.Init())
+                {
+                    _sb.AppendLine("[SKIP] 三层权限  (沙箱 root 初始化失败，见 runever-cs.log)");
+                    return;
+                }
+                app.LogEnabled = false;
+
+                WriteConf(root, true, 4, 0, 0);
+                // L1 接管成功：Run 返回非空确认
+                WriteTierPlugin(root, "tier-intercept.ahk", "T接管", @"^ITC\d+$", "intercept", null, false,
+                    "Run(text) {\r\n    return \"ok\"\r\n}\r\n");
+                // L1 接管失败：Run 返回空
+                WriteTierPlugin(root, "tier-intercept-fail.ahk", "T接管失败", @"^ITF\d+$", "intercept", null, false,
+                    "Run(text) {\r\n    return \"\"\r\n}\r\n");
+                // L3 菜单可见（Out=url，模板型）
+                WriteTierPlugin(root, "tier-menu.ahk", "T菜单", @"^MENU\d+$", "url", "https://m/{0}", true, null);
+                // L1 + L3 冲突：intercept 优先
+                WriteTierPlugin(root, "tier-menu-intercept.ahk", "T菜单接管", @"^MIX\d+$", "intercept", null, true,
+                    "Run(text) {\r\n    return \"ok\"\r\n}\r\n");
+                // L2 action 零回归（menu=false）
+                WriteTierPlugin(root, "tier-action.ahk", "T命令", @"^ACT\d+$", "action", "exit 0", false, null);
+
+                // ---- L1 接管 ----
+                Eq("L1 intercept 命中 → 分档=Intercept（核心跳过、不建菜单）",
+                    app.ResolveAutoTier(new Context { Text = "ITC12345" }).ToString(), "Intercept");
+                Check("L1 intercept 命中 → TryAutoExec=true（跳过弹菜单）",
+                    app.TryAutoExec(new Context { Text = "ITC12345" }), "");
+                Eq("L1 接管失败（Run 空串）→ 回落弹菜单",
+                    app.ResolveAutoTier(new Context { Text = "ITF12345" }).ToString(), "None");
+
+                // ---- L2 零回归 ----
+                Eq("L2 Out=action 命中 → 分档=Dispatch（零回归）",
+                    app.ResolveAutoTier(new Context { Text = "ACT12345" }).ToString(), "Dispatch");
+
+                // ---- L3 互斥 ----
+                Eq("L3 menu=true 且 Out=url → 不自动派发（分档=None）",
+                    app.ResolveAutoTier(new Context { Text = "MENU1234" }).ToString(), "None");
+                Eq("互斥 intercept+menu → intercept 优先（分档=Intercept）",
+                    app.ResolveAutoTier(new Context { Text = "MIX12345" }).ToString(), "Intercept");
+
+                // ---- L3 追加位置与条目格式 ----
+                var groups = new List<MenuGroup>
+                {
+                    new MenuGroup { Name = "固定甲", Type = GroupType.Always, Items = new List<MenuItem> {
+                        new MenuItem { Title = "甲一", Type = ActionType.Action, Target = "exit 0", Level = 1 } } },
+                    new MenuGroup { Name = "固定乙", Type = GroupType.Always, Items = new List<MenuItem> {
+                        new MenuItem { Title = "乙一", Type = ActionType.Action, Target = "exit 0", Level = 1 } } },
+                    new MenuGroup { Name = "浏览器", Type = GroupType.Proc, Items = new List<MenuItem> {
+                        new MenuItem { Title = "浏览器一", Type = ActionType.Action, Target = "exit 0", Level = 1 } } },
+                };
+                int added = app.AppendPluginMenuItems(groups, new Context { Text = "MENU1234" });
+
+                Check("L3 只收录 menu=true 的非 intercept 插件（intercept 被忽略）",
+                    added == 1, "实得=" + added);
+                Check("L3 追加位置 = 最后一个 always 组之后（不进 process 槽位）",
+                    groups.Count == 4 && groups[2].Name == "插件" && groups[2].Type == GroupType.Always
+                    && groups[3].Type == GroupType.Proc,
+                    "组数=" + groups.Count
+                    + " 顺序=" + string.Join(">", groups.ConvertAll(g => g.Name).ToArray()));
+
+                if (groups.Count == 4 && groups[2].Items.Count == 1)
+                {
+                    var it = groups[2].Items[0];
+                    Eq("L3 条目标题 = 插件名", it.Title, "T菜单");
+                    Eq("L3 条目无快捷键", it.Hotkey, "");
+                    Eq("L3 条目动作 = Out", it.Type.ToString().ToLowerInvariant(), "url");
+                    Eq("L3 条目目标 = Tpl 代入弹出时选中文本", it.Target, "https://m/MENU1234");
+                }
+                else
+                {
+                    Check("L3 插件组内条目数=1", false,
+                        "实得=" + (groups.Count == 4 ? groups[2].Items.Count : -1));
+                }
+
+                // ---- 无 always 组时兜底追加到末尾 ----
+                var onlyProc = new List<MenuGroup> {
+                    new MenuGroup { Name = "仅进程", Type = GroupType.Proc, Items = new List<MenuItem> {
+                        new MenuItem { Title = "x", Type = ActionType.Action, Target = "exit 0", Level = 1 } } } };
+                int added2 = app.AppendPluginMenuItems(onlyProc, new Context { Text = "" });
+                Check("L3 无 always 组 → 追加到末尾，{0} 无选中时替换为空",
+                    added2 == 1 && onlyProc.Count == 2
+                    && onlyProc[1].Type == GroupType.Always
+                    && onlyProc[1].Items[0].Target == "https://m/",
+                    "实得 added=" + added2 + " 组数=" + onlyProc.Count
+                    + " target=[" + (onlyProc.Count > 1 ? onlyProc[1].Items[0].Target : "-") + "]");
+            }
+            catch (Exception ex)
+            {
+                Check("三层权限异常", false, ex.Message);
+            }
+            finally { DeleteSandbox(root); }
         }
 
         // ============================================================

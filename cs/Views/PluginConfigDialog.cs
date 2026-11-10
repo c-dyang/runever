@@ -201,7 +201,7 @@ namespace RunEverCs.Views
             sb.AppendLine("; key      req   def      description");
             sb.AppendLine("; Name     yes   -        插件名（菜单 / 命中提示里显示）");
             sb.AppendLine("; Match    yes   -        匹配式（正则；Whole=true 时按整段匹配）");
-            sb.AppendLine("; Out      yes   -        run / open / url / action / send / keys");
+            sb.AppendLine("; Out      yes   -        run / open / url / action / send / keys / intercept");
             sb.AppendLine("; Whole    no    true     整段匹配（false = 允许包含）");
             sb.AppendLine("; Prio     no    100      优先级（大者先匹配）");
             sb.AppendLine("; Tpl      no    -        目标模板，{0} = 选中文本（有它 = 形态 A）");
@@ -209,11 +209,20 @@ namespace RunEverCs.Views
             sb.AppendLine("; Show     no    inherit  显示执行窗口（true / false；inherit = 跟随 auto.conf）");
             sb.AppendLine("; Enabled  no    true     是否启用");
             sb.AppendLine("; Arg      no    text     选中数据类型");
-            sb.AppendLine("; Menu     no    false    是否进菜单");
+            sb.AppendLine("; Menu     no    false    是否进菜单（true = 追加到 always 段末尾，且不自动派发）");
             sb.AppendLine(";");
             sb.AppendLine("; ★ Out 不能写 \"cmd\" —— 要执行命令请写 \"action\"");
             sb.AppendLine(";   （历史炸点：写 cmd ⇒ 执行器报「未知动作类型: cmd」）");
             sb.AppendLine("; ★ 形态 A = 有 Tpl（零代码）；形态 B = 无 Tpl（插件自带 Run(text)）");
+            sb.AppendLine(";");
+            sb.AppendLine("; ★ 三层权限（声明即定档，核心不仲裁）");
+            sb.AppendLine(";   L1 接管  Out=\"intercept\"：命中后核心不建菜单、不派发、不追加，");
+            sb.AppendLine(";            插件在自己的 Run(text) 里弹自己的菜单；返回非空 = 接管成功，");
+            sb.AppendLine(";            返回空串 / 异常 / 超时（8s）= 接管失败 ⇒ 回落核心菜单");
+            sb.AppendLine(";   L2 派发  Out=run/open/url/action/send/keys：命中后直接执行，跳过弹菜单");
+            sb.AppendLine(";   L3 菜单  RVE_FN_Menu := true：不自动派发，作为菜单项追加到 always 段末尾");
+            sb.AppendLine(";            （标题 = 插件名，无快捷键，目标 = Tpl，{0} = 弹出时的选中文本）");
+            sb.AppendLine(";   ★ 互斥：intercept 与 Menu 同时声明 ⇒ intercept 优先（Menu 忽略）");
             sb.AppendLine(";");
             sb.AppendLine("; ===== 样例 1 · 形态 A（纯模板，零代码）=====");
             sb.AppendLine("global RVE_FN_Name  := \"德邦快递查询\"");
@@ -365,6 +374,16 @@ namespace RunEverCs.Views
                     hints.Add("RVE_FN_Tpl 里没有 {0}：选中文本不会被代入。");
                 if (_parsed.Out == "action" && !string.IsNullOrEmpty(_parsed.Tpl))
                     hints.Add("Out=action 且有 Tpl：形态 A 会把 Tpl 代入结果当命令执行 —— 确认这是你要的。");
+                if (_parsed.Out == "intercept")
+                {
+                    if (!string.IsNullOrEmpty(_parsed.Tpl))
+                        hints.Add("Out=intercept 不使用 Tpl（目标由插件自己决定），该行会被忽略。");
+                    else
+                        hints.Add("Out=intercept（L1 接管）：插件必须在 Run(text) 里自己弹菜单，"
+                            + "并在接管成功时返回非空（如 \"ok\"）；返回空串/超时 ⇒ 回落核心菜单。");
+                }
+                if (_parsed.Menu && _parsed.Out == "intercept")
+                    hints.Add("同时声明了 Menu 与 intercept：intercept 优先，Menu 被忽略。");
                 if (_parsed.Prio < 0)
                     hints.Add("RVE_FN_Prio 是负数：会排在所有插件之后。");
             }

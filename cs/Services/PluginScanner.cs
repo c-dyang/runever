@@ -60,8 +60,16 @@ namespace RunEverCs.Services
     ///   global RVE_FN_Out   := "url"
     ///   global RVE_FN_Tpl   := "https://...{0}"
     ///   global RVE_FN_Icon  := "chrome.exe"
+    ///   global RVE_FN_Menu  := false   ; L3：作为菜单项追加进核心菜单（always 段末尾）
     ///   global RVE_FN_Show  := true
     ///   global RVE_FN_Enabled := true
+    ///
+    /// ★ 三层权限（2026-11-10 定案，声明即定档，核心不仲裁）：
+    ///   L1 接管  out="intercept" 命中后核心不建菜单/不派发/不追加，插件自己弹菜单；
+    ///            插件 Run(text) 返回非空 = 接管成功；空/异常/超时 ⇒ 回落核心菜单。
+    ///   L2 派发  out ∈ run/open/url/action/send/keys 命中后直接派发、跳过弹菜单。
+    ///   L3 菜单  menu=true ⇒ 不自动派发，作为菜单项追加进 always 段末尾。
+    ///   ★ 互斥：intercept + menu 冲突 ⇒ intercept 优先（menu 忽略）。
     ///
     /// ★ 解析只有一份：`ParseLines`（同一个正则 + 同一个字段 switch）同时服务
     ///   ① 扫描插件文件（`ReadMeta`，只看头部 80 行）
@@ -70,7 +78,12 @@ namespace RunEverCs.Services
     /// </summary>
     public class PluginScanner
     {
-        public static readonly string[] OutTypes = { "run", "open", "url", "action", "send", "keys" };
+        /// <summary>
+        /// 合法产出形态。`intercept` = L1 接管（插件自己弹菜单，核心跳过），
+        /// 其余六种 = L2 派发（交由 Executor 执行）。
+        /// ★ 顺序即错误提示里的列举顺序（不要随意调换）。
+        /// </summary>
+        public static readonly string[] OutTypes = { "run", "open", "url", "action", "send", "keys", "intercept" };
 
         /// <summary>文件扫描只看头部这么多行（脚本体里的文本不算元数据）。</summary>
         public const int FileMetaScanLines = 80;

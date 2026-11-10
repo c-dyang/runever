@@ -200,6 +200,48 @@ namespace RunEverCs
                 "enqueued " + q2 + " → " + IconResolver.EnqueuedCount);
 
             // ------------------------------------------------------------
+            // B 组（2026-11-10）：目标本身是 http(s) 网址 ⇒ 自动推导 favicon
+            //   （用户口径：条目不允许手填图标，全自动；显式图标源优先）
+            // ------------------------------------------------------------
+            Check("B1 type=url 目标可推导站点 favicon",
+                IconResolver.ExtractFaviconUrl("https://www.bing.com/search?q=%s")
+                    == "https://www.bing.com/favicon.ico",
+                IconResolver.ExtractFaviconUrl("https://www.bing.com/search?q=%s"));
+            Check("B2 非 http(s) 目标不推导（send / 本地路径不受影响）",
+                IconResolver.ExtractFaviconUrl("send %file%") == null
+                && IconResolver.ExtractFaviconUrl("C:\\tools\\a.exe") == null,
+                "");
+            Check("B3 host 段含模板占位符 ⇒ 拒绝推导（不猜站点）",
+                IconResolver.ExtractFaviconUrl("https://%s.example/x") == null, "");
+
+            var explicitItem = new MenuItem
+            {
+                Type = ActionType.Url,
+                Target = "https://www.bing.com/x",
+                IconSource = "SHELL32.dll,71"
+            };
+            Check("B4 显式图标源优先（不触发自动推导）",
+                ir.Resolve(explicitItem) == "SHELL32.dll,71",
+                ir.Resolve(explicitItem));
+
+            var autoItem = new MenuItem
+            {
+                Type = ActionType.Url,
+                Target = "https://www.bing.com/x",
+                IconSource = ""
+            };
+            int q3 = IconResolver.EnqueuedCount;
+            ir.ResolveAll(new List<MenuGroup>
+            {
+                new MenuGroup { Name = "URL", Type = GroupType.Always, Items = new List<MenuItem> { autoItem } }
+            });
+            Check("B5 自动推导：未命中时 favicon URL 写回 IconSource（下次可命中）",
+                autoItem.IconSource == "https://www.bing.com/favicon.ico", autoItem.IconSource);
+            Check("B5 自动推导：入队 1 次（同 URL 不重复排队）",
+                IconResolver.EnqueuedCount == q3 + 1,
+                "enqueued " + q3 + " → " + IconResolver.EnqueuedCount);
+
+            // ------------------------------------------------------------
             // 收尾
             // ------------------------------------------------------------
             Sb.AppendLine();

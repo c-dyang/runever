@@ -171,7 +171,40 @@ namespace RunEverCs.Services
                 return "";
             }
 
+            // 2026-11-10：条目目标本身是 http(s) 网址 ⇒ 自动取该站 favicon
+            //   （用户口径：条目**不允许手填图标**，全自动；显式 IconSource 已在上面优先返回）
+            //   · keepUrl 写回 favicon URL ⇒ 下次弹菜单命中缓存（与 U-C 自愈路径一致）
+            string autoFavicon = ExtractFaviconUrl(item.Target);
+            if (autoFavicon != null)
+            {
+                keepUrl = autoFavicon;
+                return ResolveUrl(autoFavicon);
+            }
+
             return "";
+        }
+
+        /// <summary>
+        /// 从条目目标推导站点 favicon 地址（仅用于「图标源为空」的自动图标，2026-11-10）。
+        /// 只认 http/https；host 段含模板（%xxx）时拒绝（推导不出站点）；结果形如 `https://host/favicon.ico`。
+        /// </summary>
+        public static string ExtractFaviconUrl(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return null;
+            string t = target.Trim();
+            if (!IsUrlIcon(t)) return null;
+
+            int idx = t.IndexOf("://", StringComparison.Ordinal);
+            if (idx < 0) return null;
+            string scheme = t.Substring(0, idx).ToLowerInvariant();
+            if (scheme != "http" && scheme != "https") return null;
+
+            string rest = t.Substring(idx + 3);
+            int end = rest.IndexOfAny(new[] { '/', '?', '#', ' ', '\t', '\r', '\n' });
+            string host = end < 0 ? rest : rest.Substring(0, end);
+            if (host.Length == 0) return null;
+            if (host.IndexOf('%') >= 0) return null;   // 模板占位符在 host 段 ⇒ 推导不出站点
+            return scheme + "://" + host + "/favicon.ico";
         }
 
         /// <summary>
