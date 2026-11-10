@@ -112,7 +112,7 @@ namespace RunEverCs.Views
             //   渲染/解析/执行三处的实现在各自的卡里接（open sub / 批量执行）。
             sp.Children.Add(SettingsKit.Card(
                 SettingsKit.Toggle("文件夹条目展开为子菜单",
-                    "menus.conf 里用 open sub <目录> 时，弹菜单当场枚举该目录生成子菜单；目录空/无权限则不展开",
+                    "open 指向目录的条目（含 open sub）在弹菜单时当场枚举目录生成子菜单；目录空/无权限则不会展开",
                     GetBool("submenuEnabled", false), v => SetBool("submenuEnabled", v)),
                 SettingsKit.Text("子菜单最多几项",
                     "超出部分截断，防止大目录把菜单撑爆",

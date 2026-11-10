@@ -186,6 +186,30 @@ namespace RunEverCs.Views
                 AddField("执行窗口", cbFlag);
             }
 
+            // ---- 子菜单展示（2026-11-10）----
+            //   仅 open 有意义：勾选 ⇒ 落盘为 `open sub <目标>`（目录可枚举时渲染期展开）；
+            //   目标不是文件夹时不显示（勾了也没意义）。
+            //   ★ 全局总闸在「设置 → 触发与行为 → 文件夹条目展开为子菜单」。
+            if (it.Type == ActionType.Open)
+            {
+                string dirTarget = (it.Target ?? "").Trim(' ', '\t', '"');
+                bool isDir = dirTarget.Length > 0 && dirTarget.IndexOf('%') < 0
+                    && System.IO.Directory.Exists(dirTarget);
+                if (isDir)
+                {
+                    var cbSub = new CheckBox
+                    {
+                        Content = "以子菜单展示（文件夹）",
+                        IsChecked = it.Sub
+                    };
+                    cbSub.ToolTip = "弹菜单时当场枚举该目录生成子菜单；目录空/无权限则退化为普通 open。"
+                        + "全局总闸在「设置 → 触发与行为 → 文件夹条目展开为子菜单」。";
+                    cbSub.Checked += (s, e) => { it.Sub = true; RefreshGrid(); RefreshPreview(); MarkDirty(); };
+                    cbSub.Unchecked += (s, e) => { it.Sub = false; RefreshGrid(); RefreshPreview(); MarkDirty(); };
+                    AddField("子菜单", cbSub);
+                }
+            }
+
             // ---- 目标（v8b AC-B5）----
             //   run / action / open ⇒ 拆「文件名」+「参数」两框（**只是视图**：
             //     磁盘仍是单串 ⇒ 配置文件格式零变更，见 TargetSplit 注释）；

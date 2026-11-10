@@ -208,7 +208,13 @@ namespace RunEverCs.Services
                     else
                     {
                         // ★ U-B：`open sub <目录>` —— 目录可枚举就当场建子菜单，否则落到下面的普通叶分支
-                        if (it.Type == ActionType.Open && it.Sub && conf != null && conf.SubmenuEnabled == 1)
+                        //   ★ 2026-11-10：语义拆成两层 ——
+                        //     · 显式 sub（条目编辑页「以子菜单展示」勾选 / menus.conf 写 open sub）
+                        //       ⇒ **总是**尝试展开，不受全局闸门限制（用户明确要这个条目展开）；
+                        //     · 非显式 sub 的普通 open 目录条目 ⇒ 只有全局闸门
+                        //       「文件夹条目展开为子菜单」打开时才自动展开。
+                        if (it.Type == ActionType.Open && conf != null
+                            && (it.Sub || (conf.SubmenuEnabled == 1 && IsDirectoryTarget(it))))
                         {
                             var sr = TryBuildDirectoryMenu(it.Target, conf, 1, idmap);
                             if (sr != null)
@@ -251,6 +257,13 @@ namespace RunEverCs.Services
                             if (target.SetIconById(id, it.IconSource)) iconHit++;
                             else iconFallback++;
                         }
+                        else if (it.Type == ActionType.Open && IsDirectoryTarget(it))
+                        {
+                            // ★ 2026-11-10：文件夹条目（open 指向目录）用**系统文件夹图标**，
+                            //   不再走程序兜底图标（兜底是放大镜，对文件夹是错的）。
+                            if (target.SetFolderIconById(id)) iconHit++;
+                            else iconFallback++;
+                        }
                         else
                         {
                             // 无图标源 → 兜底图标
@@ -278,6 +291,16 @@ namespace RunEverCs.Services
                 IconHit = iconHit,
                 IconFallback = iconFallback
             };
+        }
+
+        /// <summary>open 条目的目标是不是可枚举目录（无模板占位符 + 目录存在）。</summary>
+        private static bool IsDirectoryTarget(MenuItem it)
+        {
+            if (it == null || it.Type != ActionType.Open) return false;
+            string t = (it.Target ?? "").Trim(' ', '\t', '"');
+            if (t.Length == 0 || t.IndexOf('%') >= 0) return false;
+            try { return System.IO.Directory.Exists(t); }
+            catch { return false; }
         }
 
         /// <summary>

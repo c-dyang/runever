@@ -133,14 +133,26 @@ namespace RunEverCs.Native
         /// **系统文件夹图标**（2026-11-08）—— 子菜单（`标题 | group`）的默认图标。
         /// 用 `SHGetFileInfo(SHGFI_ICON|SHGFI_SMALLICON|SHGFI_USEFILEATTRIBUTES, FILE_ATTRIBUTE_DIRECTORY)`
         /// 拿系统认定的文件夹图标，再走 IconToDib 转菜单认的 32bpp DIB；拿不到就用包内兜底图标。
+        /// ★ 2026-11-10 三次踩坑（用户实机截图暴露）：
+        ///   · 传 "C:\\" ⇒ SHGetFileInfo 按**驱动器**返回**硬盘图标**；
+        ///   · 传空串 ⇒ SHGetFileInfo **失败** ⇒ 落回 MakeFallbackIcon（放大镜兜底）；
+        ///   ⇒ 必须传一个**非空目录路径**（USEFILEATTRIBUTES 不会访问磁盘，路径只需非空）；
+        ///   路径不硬编码 —— 用 <see cref="Environment.GetFolderPath(Environment.SpecialFolder.Windows)"/>
+        ///   取系统目录（%SystemRoot%，盘符变化/精简系统都稳），取不到再退 SystemRoot 环境变量。
         /// </summary>
         public static IntPtr GetFolderIconBitmap()
         {
             if (_folderBitmap != IntPtr.Zero) return _folderBitmap;
             try
             {
+                string folderProbe = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                if (string.IsNullOrEmpty(folderProbe))
+                    folderProbe = Environment.GetEnvironmentVariable("SystemRoot");
+                if (string.IsNullOrEmpty(folderProbe))
+                    folderProbe = "C:\\Windows";   // 最后兜底（只为非空，USEFILEATTRIBUTES 不访问磁盘）
+
                 var sfi = new Win32.SHFILEINFO();
-                IntPtr r = Win32.SHGetFileInfoW("C:\\", Win32.FILE_ATTRIBUTE_DIRECTORY, ref sfi,
+                IntPtr r = Win32.SHGetFileInfoW(folderProbe, Win32.FILE_ATTRIBUTE_DIRECTORY, ref sfi,
                     (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(Win32.SHFILEINFO)),
                     Win32.SHGFI_ICON | Win32.SHGFI_SMALLICON | Win32.SHGFI_USEFILEATTRIBUTES);
                 if (r != IntPtr.Zero && sfi.hIcon != IntPtr.Zero)
@@ -166,6 +178,24 @@ namespace RunEverCs.Native
             mii.fMask = Win32.MIIM_BITMAP;
             mii.hbmpItem = hbm;
             return Win32.SetMenuItemInfoW(Handle, (uint)index, true, ref mii);
+        }
+
+        /// <summary>
+        /// 给指定**命令 ID** 的叶条目换成系统文件夹图标（2026-11-10）——
+        /// 文件夹条目（open 指向目录 / open sub 退化）本身有命令 ID，不走 popup 位置。
+        /// 与 <see cref="SetFolderIconByPosition"/> 同一套图标（SHGetFileInfo 系统文件夹图标）。
+        /// </summary>
+        public bool SetFolderIconById(int cmdId)
+        {
+            if (cmdId <= 0) return false;
+            IntPtr hbm = GetFolderIconBitmap();
+            if (hbm == IntPtr.Zero) return false;
+
+            var mii = new Win32.MENUITEMINFO();
+            mii.cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(Win32.MENUITEMINFO));
+            mii.fMask = Win32.MIIM_BITMAP;
+            mii.hbmpItem = hbm;
+            return Win32.SetMenuItemInfoW(Handle, (uint)cmdId, false, ref mii);
         }
 
         private static IntPtr _fileBitmap = IntPtr.Zero;

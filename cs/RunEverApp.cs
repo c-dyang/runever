@@ -523,7 +523,11 @@ namespace RunEverCs
             //   `InputGestureText` 只是显示、真按键得靠 `_` 助记 + 自写 PreviewKeyDown 才追平；
             //   ② 托盘进程不再加载 WPF 菜单栈（Application + MahApps 主题字典 ≈ 60MB 首解析）；
             //   ③ WPF 只留给设置窗口（独立进程 `--settings`，用完即退）。
-            var built = MenuBuilder.Build(groups);
+            // ★ 2026-11-10：必须把 conf 传进去 —— 否则 MenuBuilder 拿不到 SubmenuEnabled，
+            //   `open sub`（含条目编辑页「以子菜单展示」写出的）在真机永远不展开；
+            //   自检一直走 `Build(groups, live)` 传了 conf 才全绿，把这条真机接线漏了。
+            //   Conf 由 AutoMatcher.Load → ReadConf 在每次热键流程刷新（与 AHK 同构）。
+            var built = MenuBuilder.Build(groups, _autoMatcher != null ? _autoMatcher.Conf : null);
             Log("菜单渲染: 顶层项数=" + built.Menu.Count()
                 + " 可点条目=" + built.ItemCount
                 + " 图标命中=" + built.IconHit + " 兜底=" + built.IconFallback
