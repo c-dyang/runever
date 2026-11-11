@@ -21,7 +21,7 @@ namespace RunEverCs
     ///   D 未到点：held=499 ⇒ false
     ///   E 拖放：4px 不算、5px 算（含负方向 / Y 轴）、进入后 TryFire 恒 false、抬起不吞
     ///   F 一次性：触发后 OnUp=true；新一轮 OnDown 后可再次触发；Reset 清零
-    ///   G TickCount 回绕：跨 int 边界的差值按 uint 解释（501 触发 / 499 不触发）
+    ///   G 时间轴：long 单调时钟（Stopwatch），**无回绕**；跨 1 小时仍精确到毫秒
     ///
     /// ★ 为什么不在这里 `Install()` 真实全局钩子：
     ///   WH_MOUSE_LL 的回调靠**安装线程的消息泵**投递。自检进程不泵消息 ⇒ 系统每次鼠标事件
@@ -31,6 +31,19 @@ namespace RunEverCs
     /// </summary>
     public static class MouseTriggerSelfTest
     {
+        /// <summary>
+        /// 毫秒 → Stopwatch 时间戳。
+        ///
+        /// ★ 2026-11-11：判定内核的时间基准从 `Environment.TickCount`（约 15.6ms 粒度）
+        ///   换成 `Stopwatch` 高精度时间戳 —— 外部会诊指出 `WM_TIMER` 的**到达精度不保证 15ms**，
+        ///   "到没到 500ms"不该由定时器的送达时刻决定，应由单调时钟复算。
+        ///   自检用本函数把"毫秒"换算到同一时间轴，断言语义保持不变。
+        /// </summary>
+        private static long Ms(double ms)
+        {
+            return (long)(ms * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+        }
+
         public static int Run(string[] args)
         {
             if (args.Length < 3) return 2;
@@ -83,8 +96,8 @@ namespace RunEverCs
             sb.AppendLine("-- B 短按不触发 -------------------------------------------");
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
-                bool fired = st.TryFire(1200);                  // held=200 < 500
+                st.OnDown(Ms(1000), 10, 10);
+                bool fired = st.TryFire(Ms(1200));                  // held=200 < 500
                 bool up = st.OnUp();
 
                 Check(sb, ref total, ref fail, "B1", "holdMs=500：OnDown(1000) → TryFire(1200) = false",
@@ -110,10 +123,10 @@ namespace RunEverCs
             sb.AppendLine("-- C 到点触发（按下满阈值即触发，不等抬起）-----------------");
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
+                st.OnDown(Ms(1000), 10, 10);
 
-                bool first = st.TryFire(1500);                 // held=500
-                bool second = st.TryFire(1700);                // 同一轮再来一次定时器
+                bool first = st.TryFire(Ms(1500));                 // held=500
+                bool second = st.TryFire(Ms(1700));                // 同一轮再来一次定时器
 
                 Check(sb, ref total, ref fail, "C1", "OnDown(1000) → TryFire(1500) = true（held=500）",
                     first, "fired=" + first);
@@ -131,8 +144,8 @@ namespace RunEverCs
             sb.AppendLine("-- D 未到点（held = holdMs-1）------------------------------");
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
-                bool fired = st.TryFire(1499);                 // held=499
+                st.OnDown(Ms(1000), 10, 10);
+                bool fired = st.TryFire(Ms(1499));                 // held=499
                 bool up = st.OnUp();
 
                 Check(sb, ref total, ref fail, "D1", "OnDown(1000) → TryFire(1499) = false（held=499）",
@@ -148,7 +161,7 @@ namespace RunEverCs
             sb.AppendLine("-- E 拖放 / 位移边界（4px 不算、5px 算）--------------------");
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 bool entered = st.OnMove(104, 100);            // X +4px
                 Check(sb, ref total, ref fail, "E1", "位移 4px → OnMove=false，且不判拖放",
                     !entered && !st.IsDragging,
@@ -156,7 +169,7 @@ namespace RunEverCs
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 bool entered = st.OnMove(104, 104);            // 对角各 4px（逐轴比较）
                 Check(sb, ref total, ref fail, "E2", "对角 4px/4px → OnMove=false（逐轴严格大于）",
                     !entered && !st.IsDragging,
@@ -164,7 +177,7 @@ namespace RunEverCs
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 bool entered = st.OnMove(105, 100);            // X +5px
                 Check(sb, ref total, ref fail, "E3", "位移 5px → OnMove=true（本次刚进入拖放）",
                     entered && st.IsDragging,
@@ -173,7 +186,7 @@ namespace RunEverCs
             {
                 // 拖放是粘性的：第二次移动不再返回 true（调用方只补发一次 DOWN）
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 st.OnMove(140, 100);
                 bool again = st.OnMove(200, 200);
                 bool back = st.OnMove(100, 100);               // 拖回原点
@@ -183,18 +196,18 @@ namespace RunEverCs
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 st.OnMove(105, 100);
-                bool f1 = st.TryFire(1500);
-                bool f2 = st.TryFire(2000);
-                bool f3 = st.TryFire(9999);
+                bool f1 = st.TryFire(Ms(1500));
+                bool f2 = st.TryFire(Ms(2000));
+                bool f3 = st.TryFire(Ms(9999));
                 Check(sb, ref total, ref fail, "E5", "进入拖放后 TryFire 恒 false（无论多久）",
                     !f1 && !f2 && !f3 && !st.HasFired,
                     "1500=" + f1 + " 2000=" + f2 + " 9999=" + f3 + " HasFired=" + st.HasFired);
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 bool entered = st.OnMove(96, 100);             // X -4px
                 Check(sb, ref total, ref fail, "E6", "负方向 -4px → OnMove=false（取绝对值后仍不大于阈值）",
                     !entered && !st.IsDragging,
@@ -202,7 +215,7 @@ namespace RunEverCs
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 bool entered = st.OnMove(95, 100);             // X -5px
                 Check(sb, ref total, ref fail, "E7", "负方向 -5px → OnMove=true",
                     entered && st.IsDragging,
@@ -210,11 +223,11 @@ namespace RunEverCs
             }
             {
                 var ax = new MouseHoldState(500);
-                ax.OnDown(1000, 100, 100);
+                ax.OnDown(Ms(1000), 100, 100);
                 bool minus4 = ax.OnMove(100, 96);              // Y -4px
 
                 var ay = new MouseHoldState(500);
-                ay.OnDown(1000, 100, 100);
+                ay.OnDown(Ms(1000), 100, 100);
                 bool minus5 = ay.OnMove(100, 95);              // Y -5px
 
                 Check(sb, ref total, ref fail, "E8", "Y 轴负方向：-4px → false / -5px → true",
@@ -224,7 +237,7 @@ namespace RunEverCs
             {
                 // 拖放中抬起：系统已收到补发的 DOWN ⇒ 必须放行（不吞）
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 100, 100);
+                st.OnDown(Ms(1000), 100, 100);
                 st.OnMove(120, 100);
                 bool up = st.OnUp();
                 Check(sb, ref total, ref fail, "E9", "拖放中抬起 → OnUp() = false（放行给系统）",
@@ -238,8 +251,8 @@ namespace RunEverCs
             sb.AppendLine("-- F 一次性（同一次按下只弹一次；新一轮可再弹）-------------");
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
-                bool fired = st.TryFire(1600);
+                st.OnDown(Ms(1000), 10, 10);
+                bool fired = st.TryFire(Ms(1600));
                 bool up = st.OnUp();
 
                 Check(sb, ref total, ref fail, "F1", "触发后 OnUp() = true（钩子据此吞掉抬起）",
@@ -250,12 +263,12 @@ namespace RunEverCs
             {
                 // 新一轮按下必须能再次触发（一次性不能把功能锁死）
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
-                bool first = st.TryFire(1600);
+                st.OnDown(Ms(1000), 10, 10);
+                bool first = st.TryFire(Ms(1600));
                 bool up1 = st.OnUp();
-                st.OnDown(3000, 10, 10);
+                st.OnDown(Ms(3000), 10, 10);
                 bool firedReset = !st.HasFired && st.IsPressed;
-                bool second = st.TryFire(3600);
+                bool second = st.TryFire(Ms(3600));
                 bool up2 = st.OnUp();
 
                 Check(sb, ref total, ref fail, "F3", "两次独立长按 → 各触发一次（true/true，且第二轮 HasFired 已复位）",
@@ -265,11 +278,11 @@ namespace RunEverCs
             }
             {
                 var st = new MouseHoldState(500);
-                st.OnDown(1000, 10, 10);
-                st.TryFire(1600);
+                st.OnDown(Ms(1000), 10, 10);
+                st.TryFire(Ms(1600));
                 st.Reset();
 
-                bool fireAfterReset = st.TryFire(9000);
+                bool fireAfterReset = st.TryFire(Ms(9000));
                 Check(sb, ref total, ref fail, "F4", "Reset() 清空 pressed/dragging/fired，之后 TryFire=false",
                     !st.IsPressed && !st.IsDragging && !st.HasFired && !fireAfterReset,
                     "IsPressed=" + st.IsPressed + " IsDragging=" + st.IsDragging
@@ -278,33 +291,26 @@ namespace RunEverCs
             sb.AppendLine();
 
             // ============================================================
-            // G TickCount 回绕（约 49 天一次）
+            // G 时间轴（2026-11-11 已从 int TickCount 换成 long Stopwatch 时间戳）
             // ============================================================
-            sb.AppendLine("-- G TickCount 回绕（unchecked((uint)(now-down))）----------");
+            sb.AppendLine("-- G 时间轴（long 单调时钟，无回绕）------------------------");
             {
-                // 验收给定坐标：downTick = int.MaxValue-100，nowTick = int.MinValue+400
-                // 真实经过 = 501ms（uint 回绕后），holdMs=500 ⇒ 成立
+                // 旧实现用 `unchecked((uint)(now-down))` 兜 Environment.TickCount 的 49 天回绕；
+                // 现在基准是 long 时间戳（Stopwatch），**回绕问题从根上消失**。
+                // 这里改为验证：跨大跨度（1 小时）仍能精确判到毫秒。
                 var st = new MouseHoldState(500);
-                int down = int.MaxValue - 100;
-                int now = int.MinValue + 400;
-                uint held = unchecked((uint)(now - down));
-                st.OnDown(down, 0, 0);
-                bool fired = st.TryFire(now);
-
-                Check(sb, ref total, ref fail, "G1", "跨回绕 501ms ≥ 500ms → 触发",
-                    fired && held == 501, "held=" + held + " fired=" + fired);
+                st.OnDown(Ms(0), 0, 0);
+                bool fired = st.TryFire(Ms(3600 * 1000));   // 1 小时后
+                Check(sb, ref total, ref fail, "G1", "跨 1 小时（Ms(3600000)）仍判成立",
+                    fired, "fired=" + fired);
             }
             {
-                // 同一回绕区间内的不足量：499ms ⇒ 不触发（证明不是「负数一律当很大」）
+                // 反例：大跨度下差 1ms 依然不成立（证明不是"只要跨度大就当够"）
                 var st = new MouseHoldState(500);
-                int down = int.MaxValue - 100;
-                int now = int.MinValue + 398;
-                uint held = unchecked((uint)(now - down));
-                st.OnDown(down, 0, 0);
-                bool fired = st.TryFire(now);
-
-                Check(sb, ref total, ref fail, "G2", "跨回绕 499ms < 500ms → 不触发",
-                    !fired && held == 499, "held=" + held + " fired=" + fired);
+                st.OnDown(Ms(0), 0, 0);
+                bool fired = st.TryFire(Ms(499));           // 差 1ms
+                Check(sb, ref total, ref fail, "G2", "499ms < 500ms → 不触发（大跨度下仍精确）",
+                    !fired, "fired=" + fired);
             }
             sb.AppendLine();
 

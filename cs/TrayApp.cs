@@ -47,6 +47,12 @@ namespace RunEverCs
         /// <summary>定时器消息（长按到点用它驱动弹菜单）。</summary>
         private const int WM_TIMER = 0x0113;
 
+        /// <summary>配置变更通知（线程池轮询 → 主线程执行，WM_APP+84）。</summary>
+        private const int WM_CONF_CHANGED = 0x8000 + 0x54;
+
+        private const int ConfChangedAuto = 1;
+        private const int ConfChangedMenus = 2;
+
         private readonly string _root;
         private RunEverApp _app;
         private MessageWindow _msgWnd;
@@ -915,9 +921,29 @@ namespace RunEverCs
             }
             else if (msg == MouseTrigger.WM_REPLAY)
             {
-                // ★ 2026-11-11：钩子回调里不许 SendInput（会重入钩子链卡死消息泵），
-                //   它只投递本消息，真正的注入在这里做 —— 主线程、非回调上下文。
-                if (_mouse != null) _mouse.DoReplay(wParam.ToInt32() != 0);
+                // ★ 2026-11-11：钩子回调只投递（回调里 SendInput 会重入钩子链卡死消息泵）。
+                //   真正的注入在这里 —— 主线程、非回调上下文。三态时序处理在 OnReplayRequest 内。
+                if (_mouse != null) _mouse.OnReplayRequest();
+            }
+            else if (msg == WM_CONF_CHANGED)
+            {
+                // ★ 2026-11-11：配置文件轮询跑在线程池（System.Threading.Timer），
+                //   它只比对 mtime，真正动作必须回主线程 —— 这些调用会碰消息窗口、
+                //   RegisterHotKey / SetWindowsHookEx 和菜单树，跨线程做是隐患。
+                int kind = wParam.ToInt32();
+                if (kind == ConfChangedAuto && _app != null)
+                {
+                    _app.Log("auto.conf 变更 ⇒ 重应用（热键 / 鼠标触发 / 日志开关）");
+                    _app.OnAutoConfSaved();
+                    ApplyHotkey();
+                    ApplyMouseTrigger();
+                    ApplyLogSettingNow();
+                }
+                else if (kind == ConfChangedMenus && _app != null)
+                {
+                    _app.Log("menus.conf 变更 ⇒ 重载菜单");
+                    _app.OnConfigSaved();
+                }
             }
         }
 
@@ -1008,24 +1034,30 @@ namespace RunEverCs
         {
             try
             {
+                // ★ 这里跑在线程池：**只比对时间戳**，任何实际动作都 PostMessage 回主线程。
                 string a = StampOf(Path.Combine(_root, "config", "auto.conf"));
                 if (a != _autoConfStamp)
                 {
                     _autoConfStamp = a;
-                    if (_app != null) _app.Log("auto.conf 变更 ⇒ 重应用（热键 / 鼠标触发 / 日志开关）");
-                    if (_app != null) _app.OnAutoConfSaved();
-                    ApplyHotkey();
-                    ApplyMouseTrigger();
-                    ApplyLogSettingNow();
+                    PostConfChanged(ConfChangedAuto);
                 }
 
                 string m = StampOf(Path.Combine(_root, "config", "menus.conf"));
                 if (m != _menusConfStamp)
                 {
                     _menusConfStamp = m;
-                    if (_app != null) _app.Log("menus.conf 变更 ⇒ 重载菜单");
-                    if (_app != null) _app.OnConfigSaved();
+                    PostConfChanged(ConfChangedMenus);
                 }
+            }
+            catch { }
+        }
+
+        private void PostConfChanged(int kind)
+        {
+            try
+            {
+                if (_msgWnd != null && _msgWnd.Handle != IntPtr.Zero)
+                    PostMessage(_msgWnd.Handle, WM_CONF_CHANGED, (IntPtr)kind, IntPtr.Zero);
             }
             catch { }
         }

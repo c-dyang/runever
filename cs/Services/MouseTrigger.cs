@@ -7,13 +7,17 @@ namespace RunEverCs.Services
     /// <summary>
     /// 长按判定状态机 —— **纯逻辑、零 Win32、零 IO**（可被自检机械断言）。
     ///
-    /// ★ 2026-11-11 语义修订（用户定案）：**按下达到阈值即触发**，不等抬起。
-    ///   OnDown(tick,x,y)   → 记录起点，复位标志
-    ///   OnMove(x,y)        → 位移 &gt; <see cref="DragThresholdPx"/>（严格大于）进入拖放，返回 true 通知补发 DOWN
-    ///   TryFire(nowTick)   → 定时器到达：未拖放且未触发且 held &gt;= holdMs ⇒ true（并置已触发）
-    ///   OnUp()             → 返回「是否已触发过」：true ⇒ 吞抬起；false ⇒ 短按/拖放，由钩子决定重放
+    /// 时序语义（与钩子回调一一对应）：
+    ///   OnDown(stamp,x,y) → 记录起点，复位标志
+    ///   OnMove(x,y)       → 位移 &gt; <see cref="DragThresholdPx"/>（严格大于）进入拖放；
+    ///                       **已触发（fired）后不再进拖放**
+    ///   TryFire(nowStamp) → 未拖放 + 未触发 + 真实经过时间 &gt;= holdMs ⇒ true（并置 fired）
+    ///   OnUp()            → 返回「本次按下是否已触发过」
     ///
-    /// ★ 线程模型：钩子回调与 WM_TIMER 都在安装钩子的那个线程上，无竞态。
+    /// ★ 2026-11-11 修订（外部会诊后）：
+    ///   ① 时间基准从 `Environment.TickCount`（约 15.6ms 粒度）换成 `Stopwatch` 高精度时间戳
+    ///      —— `WM_TIMER` 的触发精度并不保证 15ms，只靠它算"到没到 500ms"不严谨。
+    ///   ② `fired` 之后禁止再进拖放：否则「菜单已经弹出，又被拖放逻辑截走」。
     /// </summary>
     public sealed class MouseHoldState
     {
@@ -28,7 +32,7 @@ namespace RunEverCs.Services
 
         private readonly int _holdMs;
 
-        private int _downTick;
+        private long _downStamp;
         private int _downX;
         private int _downY;
         private bool _pressed;
@@ -53,10 +57,10 @@ namespace RunEverCs.Services
             _holdMs = ClampHoldMs(holdMs);
         }
 
-        /// <summary>右键按下：记录时刻与坐标起点（钩子随后吞掉该 DOWN 并起定时器）。</summary>
-        public void OnDown(int tick, int x, int y)
+        /// <summary>右键按下：记录高精度时间戳与坐标起点（钩子随后吞掉该 DOWN 并起定时器）。</summary>
+        public void OnDown(long stamp, int x, int y)
         {
-            _downTick = tick;
+            _downStamp = stamp;
             _downX = x;
             _downY = y;
             _pressed = true;
@@ -65,12 +69,12 @@ namespace RunEverCs.Services
         }
 
         /// <summary>
-        /// 按下期间的移动。返回 <c>true</c> = **本次调用刚进入拖放**（调用方据此补发一个 DOWN 给系统）。
-        /// 拖放是粘性的：一旦为真，抬起前不再复位。
+        /// 按下期间的移动。返回 <c>true</c> = **本次调用刚进入拖放**。
+        /// ★ 已触发后恒返回 false：菜单已经弹出，再让拖放逻辑接管会造成"菜单还在、系统却开始拖路径"。
         /// </summary>
         public bool OnMove(int x, int y)
         {
-            if (!_pressed || _dragging) return false;
+            if (!_pressed || _dragging || _fired) return false;
 
             if (Math.Abs(x - _downX) > DragThresholdPx
                 || Math.Abs(y - _downY) > DragThresholdPx)
@@ -82,15 +86,15 @@ namespace RunEverCs.Services
         }
 
         /// <summary>
-        /// 定时器到达：**未拖放 + 未触发 + 按住已满 holdMs** ⇒ 触发（置已触发并返回 true）。
-        /// 无符号差值处理 TickCount 的 49 天回绕。
+        /// 定时器到达：**未拖放 + 未触发 + 真实经过时间已满 holdMs** ⇒ 触发（置 fired 并返回 true）。
+        /// 时间用 Stopwatch 时间戳复算，不信任 WM_TIMER 的到达时刻。
         /// </summary>
-        public bool TryFire(int nowTick)
+        public bool TryFire(long nowStamp)
         {
             if (!_pressed || _dragging || _fired) return false;
 
-            long held = unchecked((uint)(nowTick - _downTick));
-            if (held < _holdMs) return false;
+            double elapsedMs = (nowStamp - _downStamp) * 1000.0 / Stopwatch.Frequency;
+            if (elapsedMs < _holdMs) return false;
 
             _fired = true;
             return true;
@@ -98,7 +102,7 @@ namespace RunEverCs.Services
 
         /// <summary>
         /// 右键抬起：返回「本次按下是否已经触发过」。
-        /// true ⇒ 钩子吞掉抬起（系统视角从未按下过，干净）；false ⇒ 短按或拖放，由钩子重放/放行。
+        /// true ⇒ 钩子吞掉抬起（系统视角从未按下过，干净）；false ⇒ 短按或拖放，由钩子决定。
         /// </summary>
         public bool OnUp()
         {
@@ -117,32 +121,30 @@ namespace RunEverCs.Services
     }
 
     /// <summary>
-    /// 长按右键触发 —— WH_MOUSE_LL 低层鼠标钩子（2026-11-11 新增；同日按用户定案改为「按到时间即弹」）。
+    /// 长按右键触发 —— WH_MOUSE_LL 低层鼠标钩子。
     ///
-    /// ★ 为什么在 C# 而不是 AHK：
-    ///   触发热键一直在 C# 托盘（TrayApp.RegisterHotKey，日志实证 2026-10-03 起），
-    ///   AHK 的 HotkeyTrigger.ahk 已退役；且 RegisterHotKey 不支持鼠标键。
+    /// ★★ 2026-11-11 三次修订史（每次都是真机事故换来的，不要回退）：
+    ///   ① 只吞 UP → 目标窗口认为「右键一直按着」，菜单弹出后点不起 ⇒ 改为 DOWN 也吞。
+    ///   ② **在钩子回调里直接 SendInput → 注入事件立刻重入钩子链 ⇒ 消息泵自锁**
+    ///      （症状：长按右键失效 + 热键无响应 + 进程卡在退出流程）。
+    ///      ⇒ 回调里只 `PostMessage` 投递，注入放主线程。
+    ///   ③ 投递与物理事件之间存在**时序竞态**（外部会诊指出）：
+    ///      拖放请求还在队列里、物理 UP 已经到了 ⇒ 系统收到一个没有配对的 UP。
+    ///      ⇒ 引入 pending / injected / released 三态（见 <see cref="OnReplayRequest"/>）。
     ///
-    /// ★ 时序（2026-11-11 修订版，**这是核心**）：
-    ///   RBUTTONDOWN → **吞掉**（return 1）+ 起 SetTimer(holdMs)
-    ///   MOUSEMOVE   → 位移 &gt;4px ⇒ 取消定时器 + **补发一个 DOWN**（让系统接管拖放）
-    ///   WM_TIMER    → 取消定时器，由 TrayApp 弹菜单（此时手指仍按着）
-    ///   RBUTTONUP   → 已触发过 ⇒ 吞掉（系统从没收到 DOWN，无状态残留）
-    ///                 拖放中   ⇒ 放行（系统已收到补发的 DOWN）
-    ///                 短按     ⇒ **补发 DOWN+UP**（系统收到完整点击 ⇒ 系统右键菜单照常弹）
-    ///
-    /// ★ 为什么 DOWN 也要吞（上一版的 bug 就在这）：
-    ///   只吞 UP 会让目标窗口认为「右键一直按着」⇒ 菜单弹出后资源管理器处于按下模态，
-    ///   表现为「菜单点不起」。DOWN 吞掉后系统视角干净，TrackPopupMenu 也不会撞上
-    ///   「按钮已按下 ⇒ 菜单不显示/返回 0」这个已知 Win32 坑。
-    ///
-    /// ★ 补发事件的防自触发：SendInput 带 dwExtraInfo 魔数（<see cref="ReplayMagic"/>），
-    ///   钩子见到魔数直接放行，不再进入判定。
+    /// ★ 当前时序：
+    ///   RBUTTONDOWN → 吞掉（return 1）+ SetTimer(holdMs)
+    ///   MOUSEMOVE   → 位移 &gt;4px ⇒ KillTimer + 请求补发 DOWN（**只投递**）
+    ///   WM_TIMER    → 主线程复算真实耗时，够了就弹菜单（手指仍按着）
+    ///   RBUTTONUP   → 已触发        ⇒ 吞
+    ///                 DOWN 已注入   ⇒ 放行（系统有完整配对）
+    ///                 DOWN 待注入   ⇒ **吞掉并标记已释放**，等主线程发 DOWN+UP 一次补齐
+    ///                 短按          ⇒ 请求「一次原子 tap」，吞原始 UP
     ///
     /// ★ 三条硬约束（违反会出诡异故障）：
-    ///   ① 回调必须 &lt;300ms 返回 —— 超时后系统**静默卸载钩子**（症状：用着用着失灵，无报错）
-    ///   ② 弹菜单不在回调里做 —— 定时器消息回 TrayApp 主线程后再弹
-    ///   ③ 回调内不做 IO、不读配置、不弹窗
+    ///   ① 回调必须 &lt;300ms 返回 —— 超时后系统**静默卸载钩子**
+    ///   ② **回调内禁止 SendInput / SendMessage / 任何同步等待 / IO**
+    ///   ③ 弹菜单不在回调里做 —— 定时器消息回主线程后再弹
     /// </summary>
     public sealed class MouseTrigger : IDisposable
     {
@@ -161,11 +163,13 @@ namespace RunEverCs.Services
         /// <summary>WM_TIMER 的定时器 id（TrayApp 在消息回调里按它分流）。</summary>
         public const int TimerId = 0x5257;
 
-        /// <summary>钩子 → 主线程的「请你补发一个右键事件」请求（WM_APP+83）。</summary>
+        /// <summary>钩子 → 主线程的「请补发」请求（WM_APP+83）。</summary>
         public const int WM_REPLAY = 0x8000 + 0x53;
 
-        /// <summary>WM_REPLAY 的 wParam：1 = 补发按下，0 = 补发抬起。</summary>
-        public const int ReplayDown = 1;
+        // ---- 补发请求类型 ----
+        private const int ReqNone = 0;
+        private const int ReqDown = 1;   // 拖放：只要补 DOWN
+        private const int ReqTap = 2;    // 短按：原子 DOWN+UP
 
         private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
@@ -224,7 +228,12 @@ namespace RunEverCs.Services
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr GetModuleHandleW(string lpModuleName);
 
-        // ★ 字段持有委托，防 GC 回收（钩子回调被回收 = 进程直接崩）
+        // 钩子线程写、主线程读 —— 都是 int/bool 原子读写
+        private int _pendingReplay = ReqNone;
+        private volatile bool _downInjected;      // 补发的 DOWN 已真正注入
+        private volatile bool _physicalReleased;  // 物理 UP 已到，但 DOWN 还没注入
+        private int _postFailCount;               // PostMessage 失败次数（主线程定期落日志）
+
         private readonly LowLevelMouseProc _proc;
         private IntPtr _hook = IntPtr.Zero;
 
@@ -233,15 +242,12 @@ namespace RunEverCs.Services
         private readonly Action<string> _log;
 
         public bool IsHooked { get { return _hook != IntPtr.Zero; } }
-
-        /// <summary>实际生效的长按阈值（已被夹到 200-3000）。</summary>
         public int HoldMs { get { return _state.HoldMs; } }
-
         public MouseHoldState State { get { return _state; } }
 
         /// <param name="holdMs">长按阈值（毫秒），200-3000 外会被夹到边界。</param>
-        /// <param name="hwnd">消息窗口句柄（SetTimer 的宿主；WM_TIMER 由 TrayApp 分流）。</param>
-        /// <param name="log">日志出口（TrayApp 的 _app.Log）。</param>
+        /// <param name="hwnd">消息窗口句柄（SetTimer 宿主 + WM_REPLAY 目的地）。</param>
+        /// <param name="log">日志出口（**只在主线程路径上调用**）。</param>
         public MouseTrigger(int holdMs, IntPtr hwnd, Action<string> log)
         {
             _state = new MouseHoldState(holdMs);
@@ -285,6 +291,9 @@ namespace RunEverCs.Services
             try { UnhookWindowsHookEx(_hook); } catch { }
             _hook = IntPtr.Zero;
             _state.Reset();
+            _pendingReplay = ReqNone;
+            _downInjected = false;
+            _physicalReleased = false;
         }
 
         public void Dispose()
@@ -293,49 +302,121 @@ namespace RunEverCs.Services
         }
 
         /// <summary>
-        /// 定时器到（TrayApp 收到 WM_TIMER 时调）：更新状态，返回 <c>true</c> 表示该弹菜单。
-        /// 若返回 false（期间进了拖放/已触发），静默丢弃。
+        /// 定时器到（TrayApp 收到 WM_TIMER 时**在主线程**调）：用高精度时间戳复算，够久才返回 true。
         /// </summary>
         public bool OnTimerElapsed()
         {
-            bool fire = _state.TryFire(Environment.TickCount);
+            bool fire = _state.TryFire(Stopwatch.GetTimestamp());
             if (fire && _hwnd != IntPtr.Zero) KillTimer(_hwnd, TimerId);
             return fire;
         }
 
         /// <summary>
-        /// 请求补发（**只在钩子回调里调用**）：只投递一条消息，立即返回。
+        /// 主线程收到 WM_REPLAY 时调用：真正执行注入。
         ///
-        /// ★★ 2026-11-11 致命 bug 修复点：**钩子回调里绝不能调 SendInput**。
-        ///   注入的事件会**立刻重新进入钩子链**（PowerToys #5040 原话：
-        ///   "as soon as SendInput is called the next hook event gets processed"），
-        ///   于是本进程在钩子回调里同步等待自己的下一个回调 ⇒ 消息泵卡死。
-        ///   实测症状（用户机器，EnableLUA=0）：长按右键失效 + 热键无响应 + 进程杀不掉。
-        ///   同款现象见 SO 62662606「程序停止响应」、SO 60236649「延迟 400ms」。
-        ///   ⇒ 回调里只做内存操作 + SetTimer/KillTimer + PostMessage（全部非阻塞）。
+        /// ★ 三态处理（外部会诊指出的时序竞态）：
+        ///   拖放请求到达时，若物理 UP 已经先到（`_physicalReleased`），
+        ///   那就不能只补 DOWN（会留下没有抬起配对的按下），而是**一次性补完整 tap**。
         /// </summary>
-        private void RequestReplay(bool down)
+        public void OnReplayRequest()
         {
-            if (_hwnd == IntPtr.Zero) return;
-            try { PostMessageW(_hwnd, WM_REPLAY, down ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero); }
-            catch { }
+            int req = System.Threading.Interlocked.Exchange(ref _pendingReplay, ReqNone);
+            if (req == ReqNone) return;
+
+            if (req == ReqTap)
+            {
+                DoTap();
+                return;
+            }
+
+            // req == ReqDown（拖放场景）
+            if (_physicalReleased)
+            {
+                // 请求还在路上，用户已经松手 → 补一次完整点击，不留悬空按下
+                DoTap();
+            }
+            else
+            {
+                DoDown();
+                _downInjected = true;
+            }
         }
 
-        /// <summary>真正执行补发（**必须由主线程在收到 WM_REPLAY 时调用**）。</summary>
-        public void DoReplay(bool down)
+        /// <summary>主线程调用：把 PostMessage 失败次数落日志（回调里不能 IO，只能攒着）。</summary>
+        public void FlushDiagnostics()
+        {
+            int n = System.Threading.Interlocked.Exchange(ref _postFailCount, 0);
+            if (n > 0) _log("⚠ 鼠标钩子 PostMessage 失败 " + n + " 次（消息队列满？补发可能丢失）");
+        }
+
+        /// <summary>补发一次右键按下。</summary>
+        private void DoDown()
+        {
+            Send(1, MOUSEEVENTF_RIGHTDOWN);
+        }
+
+        /// <summary>
+        /// 补发一次完整点击 —— **单次 SendInput 提交 DOWN+UP**。
+        /// ★ 依据：MSDN 说单次 SendInput 内的输入按顺序插入且不会被其它输入打断 ⇒ 这才是原子事务；
+        ///   分两次调用或两条 WM_COPY 消息都可能被物理事件插进来。
+        /// </summary>
+        private void DoTap()
+        {
+            try
+            {
+                var inp = new INPUT[2];
+                inp[0].Type = INPUT_MOUSE;
+                inp[0].Mouse.Flags = MOUSEEVENTF_RIGHTDOWN;
+                inp[0].Mouse.ExtraInfo = ReplayMagic;
+                inp[1].Type = INPUT_MOUSE;
+                inp[1].Mouse.Flags = MOUSEEVENTF_RIGHTUP;
+                inp[1].Mouse.ExtraInfo = ReplayMagic;
+
+                uint sent = SendInput(2, inp, Marshal.SizeOf(typeof(INPUT)));
+                if (sent != 2)
+                    _log("⚠ 补发点击未完整注入（SendInput 返回 " + sent
+                        + "/2，err=" + Marshal.GetLastWin32Error() + "）");
+            }
+            catch (Exception ex)
+            {
+                _log("补发点击异常: " + ex.Message);
+            }
+        }
+
+        private void Send(uint count, int flag)
         {
             try
             {
                 var inp = new INPUT[1];
                 inp[0].Type = INPUT_MOUSE;
-                inp[0].Mouse.Flags = down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
+                inp[0].Mouse.Flags = flag;
                 inp[0].Mouse.ExtraInfo = ReplayMagic;
-                SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+
+                uint sent = SendInput(1, inp, Marshal.SizeOf(typeof(INPUT)));
+                if (sent != count)
+                    _log("⚠ 补发右键未注入（SendInput 返回 " + sent + "/" + count
+                        + "，err=" + Marshal.GetLastWin32Error() + "）");
             }
             catch (Exception ex)
             {
-                try { _log("补发右键失败: " + ex.Message); } catch { }
+                _log("补发右键异常: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// 请求补发（**只在钩子回调里调用**）：只投递一条消息，立即返回。
+        ///
+        /// ★★ 绝不能在回调里调 SendInput：注入的事件会立刻重入钩子链
+        ///   （PowerToys #5040：“as soon as SendInput is called the next hook event gets processed”），
+        ///   本进程就在回调里等自己的下一个回调 ⇒ 消息泵自锁。
+        ///   实测症状：长按右键失效 + 热键无响应 + 进程卡在退出流程。
+        /// </summary>
+        private void RequestReplay(int kind)
+        {
+            if (_hwnd == IntPtr.Zero) return;
+            System.Threading.Interlocked.Exchange(ref _pendingReplay, kind);
+            if (!PostMessageW(_hwnd, WM_REPLAY, IntPtr.Zero, IntPtr.Zero))
+                System.Threading.Interlocked.Increment(ref _postFailCount);
         }
 
         private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
@@ -354,7 +435,9 @@ namespace RunEverCs.Services
 
                 if (msg == WM_RBUTTONDOWN)
                 {
-                    _state.OnDown(Environment.TickCount, s.Pt.X, s.Pt.Y);
+                    _state.OnDown(Stopwatch.GetTimestamp(), s.Pt.X, s.Pt.Y);
+                    _downInjected = false;
+                    _physicalReleased = false;
                     if (_hwnd != IntPtr.Zero)
                         SetTimer(_hwnd, TimerId, (uint)_state.HoldMs, IntPtr.Zero);
                     return (IntPtr)1;   // ★ 吞：系统不知道有右键按下
@@ -364,9 +447,9 @@ namespace RunEverCs.Services
                 {
                     if (_state.OnMove(s.Pt.X, s.Pt.Y))
                     {
-                        // 进入拖放：取消长按判定，并把「按下」补还给系统（投递，不注入）
+                        // 进入拖放：取消长按判定，把「按下」补还给系统（只投递）
                         if (_hwnd != IntPtr.Zero) KillTimer(_hwnd, TimerId);
-                        RequestReplay(true);
+                        RequestReplay(ReqDown);
                     }
                     return CallNextHookEx(_hook, nCode, wParam, lParam);
                 }
@@ -380,13 +463,19 @@ namespace RunEverCs.Services
                         return (IntPtr)1;                 // 长按已弹 ⇒ 吞（系统无状态残留）
 
                     if (_state.IsDragging)
-                        return CallNextHookEx(_hook, nCode, wParam, lParam);   // 拖放 ⇒ 放行
+                    {
+                        if (_downInjected)
+                            return CallNextHookEx(_hook, nCode, wParam, lParam);   // 有配对 ⇒ 放行
 
-                    // 短按：系统从没见过按下 ⇒ 补一次完整点击，系统右键菜单照常弹
-                    //   （★ 只投递，实际 SendInput 在主线程做 —— 回调里直接注入会卡死消息泵）
-                    RequestReplay(true);
-                    RequestReplay(false);
-                    return (IntPtr)1;                     // 原始 UP 吞掉，避免重复
+                        // ★ DOWN 还在队列里没注入：吞掉这次 UP 并打标记，
+                        //   主线程稍后看到标记会改发「原子 tap」，不留悬空按下。
+                        _physicalReleased = true;
+                        return (IntPtr)1;
+                    }
+
+                    // 短按：系统从没见过按下 ⇒ 请求一次原子 tap，原始 UP 吞掉
+                    RequestReplay(ReqTap);
+                    return (IntPtr)1;
                 }
             }
             catch (Exception ex)
