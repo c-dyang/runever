@@ -181,6 +181,105 @@ namespace RunEverCs.Services
             {"F21", 0x84}, {"F22", 0x85}, {"F23", 0x86}, {"F24", 0x87}
         };
 
+        /// <summary>纯键名显示（设置页用）：Ctrl+Alt+A / 反引号 / 空格 / F8，不带调试尾巴。</summary>
+        public string ToDisplay()
+        {
+            string m = "";
+            if ((Modifiers & MOD_CONTROL) != 0) m += "Ctrl+";
+            if ((Modifiers & MOD_ALT) != 0) m += "Alt+";
+            if ((Modifiers & MOD_SHIFT) != 0) m += "Shift+";
+            if ((Modifiers & MOD_WIN) != 0) m += "Win+";
+
+            string k = Text;
+            foreach (char c in "^!+#")
+                if (k.StartsWith(c.ToString())) k = k.Substring(1);
+            return m + HumanizeKey(k);
+        }
+
+        /// <summary>AHK 主键 → 人话（设置页显示用）。</summary>
+        public static string HumanizeKey(string key)
+        {
+            if (key == "`") return "反引号";
+            switch ((key ?? "").ToUpperInvariant())
+            {
+                case "SPACE": return "空格";
+                case "TAB": return "Tab";
+                case "ENTER": case "RETURN": return "回车";
+                case "ESC": case "ESCAPE": return "Esc";
+                case "BACKSPACE": case "BS": return "退格";
+                case "INSERT": case "INS": return "Insert";
+                case "DELETE": case "DEL": return "Delete";
+                case "PGUP": return "PgUp";
+                case "PGDN": return "PgDn";
+                case "UP": return "↑";
+                case "DOWN": return "↓";
+                case "LEFT": return "←";
+                case "RIGHT": return "→";
+            }
+            return key;
+        }
+
+        /// <summary>人话键名 → AHK 主键（HumanizeKey 的反函数）。</summary>
+        public static string DehumanizeKey(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return "";
+            if (key == "反引号") return "`";
+            switch (key)
+            {
+                case "空格": return "Space";
+                case "回车": return "Enter";
+                case "退格": return "Backspace";
+                case "↑": return "Up";
+                case "↓": return "Down";
+                case "←": return "Left";
+                case "→": return "Right";
+            }
+            return key;
+        }
+
+        /// <summary>
+        /// 设置页输入解析：先按 AHK 写法（^!a），再按键名写法（Ctrl+Alt+A / 反引号 / 空格）。
+        /// 两条都失败则返回 false（调用方负责还原显示成当前生效值）。
+        /// </summary>
+        public static bool TryParseDisplay(string raw, out HotkeySpec spec, out string err)
+        {
+            spec = null;
+            if (TryParse(raw, out spec, out err)) return true;
+
+            string s = (raw ?? "").Trim();
+            if (s.Length == 0) { err = "热键不能为空"; return false; }
+
+            uint mods = 0;
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                string[][] pre = {
+                    new[] { "Ctrl+", "^" }, new[] { "Control+", "^" },
+                    new[] { "Alt+", "!" }, new[] { "Shift+", "+" }, new[] { "Win+", "#" }
+                };
+                foreach (var p in pre)
+                {
+                    if (s.StartsWith(p[0], StringComparison.OrdinalIgnoreCase))
+                    {
+                        mods |= p[1] == "^" ? MOD_CONTROL
+                              : p[1] == "!" ? MOD_ALT
+                              : p[1] == "+" ? MOD_SHIFT : MOD_WIN;
+                        s = s.Substring(p[0].Length);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+
+            string head = "";
+            if ((mods & MOD_CONTROL) != 0) head += "^";
+            if ((mods & MOD_ALT) != 0) head += "!";
+            if ((mods & MOD_SHIFT) != 0) head += "+";
+            if ((mods & MOD_WIN) != 0) head += "#";
+            return TryParse(head + DehumanizeKey(s), out spec, out err);
+        }
+
         /// <summary>人话描述，用于托盘「状态…」与日志。</summary>
         public string Describe()
         {

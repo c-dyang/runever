@@ -31,6 +31,12 @@ namespace RunEverCs.Services
             ///   （见 RunEverApp.ShowMenuFlow 的 MenuPick 分流）。
             /// </summary>
             public int FixedSearchId;
+
+            /// <summary>
+            /// 虚拟项「选中的文件」的命令 ID（0 = 本次没有选中文件 ⇒ 未插入）。
+            /// ★ 同 <see cref="FixedSearchId"/>：不在 IdMap 里，派发方先判字段再查 IdMap。
+            /// </summary>
+            public int SelectedFileId;
         }
 
         // ============================================================
@@ -92,6 +98,69 @@ namespace RunEverCs.Services
             else built.IconFallback++;
 
             built.FixedSearchId = id;
+            return id;
+        }
+
+        // ============================================================
+        // ★ S2（2026-11-11）：虚拟固定项 —— 「选中的文件」（置顶第一项）
+        //
+        // 用户定案：有选中文件时，菜单**最前**恒有这一项；点它 = 打开选中的文件。
+        //   · 单选：显示文件名；多选：显示「打开选中的 N 个文件」
+        //   · 深度复用执行器：Task{Type="open", Target="", Files=ctx.Files}
+        //     ⇒ Executor 的 U-D 循环体逐文件追加引号路径（每个文件一次，天然并发）
+        //   · 多选确认框在 RunEverApp.OpenSelectedFiles（渲染层不管交互）
+        //   · 位置靠 InsertMenuW(0) 实现（AppendMenu 只能加末尾）
+        // ============================================================
+
+        /// <summary>虚拟项「选中的文件」的命令 ID。</summary>
+        public const int SelectedFileId = FixedCommandIdBase + 2;
+
+        /// <summary>置顶项的兜底图标（通用文件）。</summary>
+        public const string SelectedFileIcon = "SHELL32.dll,0";
+
+        /// <summary>
+        /// 在菜单**最前**插入虚拟项「选中的文件」，返回命令 ID（0 = 没插）。
+        /// ★ 不选中文件 ⇒ 返回 0，不占菜单位。
+        /// </summary>
+        public static int AppendSelectedFile(BuildResult built, IList<string> files)
+        {
+            if (built == null || built.Menu == null || files == null || files.Count == 0) return 0;
+
+            string title;
+            if (files.Count == 1)
+            {
+                string name;
+                try { name = Path.GetFileName(files[0]); }
+                catch { name = files[0]; }
+                if (string.IsNullOrEmpty(name)) name = files[0];
+                if (name.Length > 40) name = name.Substring(0, 37) + "…";
+                title = "打开  " + name;
+            }
+            else
+            {
+                title = "打开选中的 " + files.Count + " 个文件";
+            }
+
+            int id = SelectedFileId;
+            if (built.IdMap != null && built.IdMap.ContainsKey(id)) return 0;
+
+            // 位置 0 + MF_BYPOSITION ⇒ 插到最前（这正是不用 AppendMenu 的原因）
+            if (!Win32.InsertMenuW(built.Menu.Handle, 0,
+                Win32.MF_BYPOSITION | Win32.MF_STRING, new IntPtr(id), title))
+                return 0;
+
+            // 图标：按第一个文件取；取不到退通用文件图标（不许因图标失败丢整项）
+            string icon = SelectedFileIcon;
+            try { if (File.Exists(files[0])) icon = files[0] + ",0"; } catch { }
+            if (built.Menu.SetIconById(id, icon)) built.IconHit++;
+            else if (icon != SelectedFileIcon && built.Menu.SetIconById(id, SelectedFileIcon)) built.IconHit++;
+            else built.IconFallback++;
+
+            // 用户要求（2026-11-11）：虚拟项后面补一条分隔线，与下方配置条目视觉分隔
+            Win32.InsertMenuW(built.Menu.Handle, 1,
+                Win32.MF_BYPOSITION | Win32.MF_SEPARATOR, IntPtr.Zero, null);
+
+            built.SelectedFileId = id;
             return id;
         }
 

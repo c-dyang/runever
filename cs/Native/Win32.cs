@@ -46,6 +46,11 @@ namespace RunEverCs.Native
         [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern bool AppendMenuW(IntPtr hMenu, uint uFlags, IntPtr uIDNewItem, string lpNewItem);
 
+        /// <summary>把菜单项插到指定位置（2026-11-11：虚拟项「选中的文件」置顶用）。
+        /// uPosition 配 <see cref="MF_BYPOSITION"/> 时是索引，0 = 最前。</summary>
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern bool InsertMenuW(IntPtr hMenu, uint uPosition, uint uFlags, IntPtr uIDNewItem, string lpNewItem);
+
         [DllImport("user32.dll", SetLastError = true)]
         public static extern int GetMenuItemCount(IntPtr hMenu);
 

@@ -143,6 +143,9 @@ namespace RunEverCs
                     case "--selftest-search":
                         Environment.ExitCode = PinyinSearchSelfTest.Run(args);
                         return;
+                    case "--selftest-mousetrigger":
+                        Environment.ExitCode = MouseTriggerSelfTest.Run(args);
+                        return;
                     case "--selftest":
                         RunSelfTest(root);
                         return;

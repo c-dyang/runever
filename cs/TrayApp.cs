@@ -41,6 +41,12 @@ namespace RunEverCs
         private const int WM_HOTKEY = 0x0312;
         private const int HOTKEY_ID = 0x5256;     // "RV"
 
+        /// <summary>鼠标钩子 → 消息窗口的异步转发（WM_APP+82，避开系统消息区）。</summary>
+        private const int WM_MOUSE_TRIGGER = 0x8000 + 0x52;
+
+        /// <summary>定时器消息（长按到点用它驱动弹菜单）。</summary>
+        private const int WM_TIMER = 0x0113;
+
         private readonly string _root;
         private RunEverApp _app;
         private MessageWindow _msgWnd;
@@ -57,6 +63,9 @@ namespace RunEverCs
 
         /// <summary>当前生效的热键（来自 auto.conf 的 hotkey=，默认反引号）。</summary>
         private HotkeySpec _hotkey;
+
+        /// <summary>长按右键触发（auto.conf: mouseTrigger / holdMs；null = 未启用）。</summary>
+        private MouseTrigger _mouse;
 
         public TrayApp(string root)
         {
@@ -111,6 +120,10 @@ namespace RunEverCs
             {
                 _app.Log("热键注册 OK: " + _hotkey.Describe());
             }
+
+            // ---- 鼠标触发（auto.conf: mouseTrigger=holdRight）----
+            //   在热键之后挂：两者互不影响；钩子装失败也只是鼠标触发不可用。
+            ApplyMouseTrigger();
 
             // ---- 托盘 ----
             BuildTray();
@@ -884,6 +897,14 @@ namespace RunEverCs
         {
             if (msg == WM_HOTKEY && wParam.ToInt32() == HOTKEY_ID)
                 InvokeMenu();
+            else if (msg == WM_MOUSE_TRIGGER)
+                InvokeMenu();
+            else if (msg == WM_TIMER && wParam.ToInt32() == MouseTrigger.TimerId)
+            {
+                // ★ 2026-11-11：长按到点由定时器驱动弹菜单（不再等抬起）
+                if (_mouse != null && _mouse.OnTimerElapsed())
+                    InvokeMenu();
+            }
         }
 
         /// <summary>弹菜单（带重入保护 —— 菜单开着时再按热键不应叠加）。</summary>
@@ -923,12 +944,15 @@ namespace RunEverCs
                     () =>
                     {
                         if (_app != null) _app.OnAutoConfSaved();
+                        // ★ 2026-11-11：改 mouseTrigger / holdMs 后立即重挂钩子
+                        //   （此前只有启动与托盘「重载配置」会调 ⇒ 设置页改完不生效）
+                        ApplyMouseTrigger();
                         // ★ B4b-11：「写运行日志」勾上/去掉要**立刻**生效
                         //   （原来只在启动时读一次 auto.conf ⇒ 改完必须重启托盘，页面又没写这句话）
                         ApplyLogSettingNow();
                     });
                 // ★ 设置里可能改了触发热键（auto.conf hotkey=）→ 关窗即重注册
-                w.Closed += (s, e) => ApplyHotkey();
+                w.Closed += (s, e) => { ApplyHotkey(); ApplyMouseTrigger(); };
                 w.Show();
                 w.Activate();
             }
@@ -1031,6 +1055,7 @@ namespace RunEverCs
             _app.UserNotifyTitled = (title, msg) => TrayTipThreadSafe(title, msg, ToolTipIcon.Info);
             _app.Log("手动重载配置: 成功");
             ApplyHotkey();      // 重载也可能改了 hotkey=
+            ApplyMouseTrigger(); // 以及 mouseTrigger / holdMs
             TrayTip("RunEver", "配置已重载", ToolTipIcon.Info);
         }
 
@@ -1130,6 +1155,87 @@ namespace RunEverCs
             catch (Exception ex)
             {
                 _app.Log("⚠ 应用热键异常: " + ex.Message);
+            }
+        }
+
+        // ============================================================
+        // 鼠标触发（auto.conf: mouseTrigger=holdRight / holdMs=500）
+        // ============================================================
+        /// <summary>读 auto.conf 的 mouseTrigger / holdMs（缺省 = off / 500）。</summary>
+        private void LoadMouseTrigger(out bool enabled, out int holdMs)
+        {
+            enabled = false;
+            holdMs = 500;
+            try
+            {
+                string conf = Path.Combine(_root, "config", "auto.conf");
+                if (!File.Exists(conf)) return;
+
+                foreach (var raw in File.ReadAllLines(conf, Encoding.UTF8))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
+
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq).Trim().ToLowerInvariant();
+                    string v = line.Substring(eq + 1).Trim();
+
+                    if (k == "mousetrigger")
+                        enabled = string.Equals(v, "holdRight", StringComparison.OrdinalIgnoreCase);
+                    else if (k == "holdms")
+                    {
+                        int n;
+                        if (int.TryParse(v, out n)) holdMs = n;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _app.Log("⚠ 读 mouseTrigger 失败: " + ex.Message);
+            }
+        }
+
+        /// <summary>按 auto.conf 当前值挂/卸鼠标触发（幂等：配置没变就什么都不做）。</summary>
+        private void ApplyMouseTrigger()
+        {
+            try
+            {
+                bool want;
+                int holdMs;
+                LoadMouseTrigger(out want, out holdMs);
+
+                if (!want)
+                {
+                    if (_mouse != null)
+                    {
+                        _mouse.Dispose();
+                        _mouse = null;
+                        _app.Log("鼠标触发: 关（已卸下钩子）");
+                    }
+                    else
+                    {
+                        // ★ 启动时也留一行：否则"没反应"时无法从日志判断是「没启用」还是「钩子没装上」
+                        _app.Log("鼠标触发: 关（auto.conf mouseTrigger 不是 holdRight）");
+                    }
+                    return;
+                }
+
+                // 已有且阈值相同 ⇒ 不动（重载配置时避免无谓地拆装钩子）
+                if (_mouse != null && _mouse.IsHooked && _mouse.HoldMs == holdMs)
+                    return;
+
+                if (_mouse != null) _mouse.Dispose();
+                _mouse = new MouseTrigger(holdMs, _msgWnd.Handle, _app.Log);
+                if (!_mouse.Install())
+                {
+                    _mouse.Dispose();
+                    _mouse = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                _app.Log("⚠ 应用鼠标触发异常: " + ex.Message);
             }
         }
 
@@ -1546,12 +1652,16 @@ namespace RunEverCs
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
+        [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
         private bool _disposed;
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            try { if (_mouse != null) { _mouse.Dispose(); _mouse = null; } } catch { }
             try
             {
                 if (_msgWnd != null && _msgWnd.Handle != IntPtr.Zero)

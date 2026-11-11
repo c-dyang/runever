@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Windows;
+using WinFormsMessageBox = System.Windows.Forms.MessageBox;
 using RunEverCs.Models;
 using RunEverCs.Native;
 using RunEverCs.Services;
@@ -571,6 +572,11 @@ namespace RunEverCs
                 built.Menu.AddItemDisabled("（没有可显示的条目）");
             }
 
+            // ★ S2（2026-11-11）：置顶虚拟项「选中的文件」—— 三段构建之后用 InsertMenuW(0) 插最前。
+            int selFileId = MenuBuilder.AppendSelectedFile(built, ctx.Files);
+            if (selFileId > 0)
+                Log("固定项: 打开选中的文件（顶层首位，虚拟 id=" + selFileId + "）");
+
             // ★ S1（2026-11-10）：末尾固定项「全库搜索」—— 虚拟项，不进 IdMap / 不参与任何过滤。
             //   放在"全空菜单占位项"之后 ⇒ 它永远是最后一项（用户定案的位置）。
             int fixedId = MenuBuilder.AppendFullSearch(built);
@@ -614,6 +620,10 @@ namespace RunEverCs
             if (pick == MenuPick.FullSearch)
             {
                 OpenFullSearch(ctx);
+            }
+            else if (pick == MenuPick.SelectedFile)
+            {
+                OpenSelectedFiles(ctx);
             }
             else if (pick == MenuPick.Execute)
             {
@@ -848,6 +858,9 @@ namespace RunEverCs
             /// <summary>虚拟固定项「全库搜索」⇒ 打开搜索窗口。</summary>
             FullSearch = 2,
 
+            /// <summary>虚拟固定项「选中的文件」⇒ 打开选中的文件（多选先确认）。</summary>
+            SelectedFile = 4,
+
             /// <summary>有 ID 但 IdMap 里没有 ⇒ 分配冲突（只有告警，不许瞎派发）。</summary>
             Unknown = 3
         }
@@ -860,6 +873,7 @@ namespace RunEverCs
         {
             if (selId <= 0 || built == null) return MenuPick.None;
             if (built.FixedSearchId != 0 && selId == built.FixedSearchId) return MenuPick.FullSearch;
+            if (built.SelectedFileId != 0 && selId == built.SelectedFileId) return MenuPick.SelectedFile;
             if (built.IdMap != null && built.IdMap.ContainsKey(selId)) return MenuPick.Execute;
             return MenuPick.Unknown;
         }
@@ -900,6 +914,70 @@ namespace RunEverCs
             catch (Exception ex)
             {
                 Log("派发失败: " + ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 「选中的文件」入口 —— 置顶虚拟项被点中时调用（S2，2026-11-11）。
+        ///
+        /// 口径（用户 2026-11-11 定）：
+        ///   · 单选 ⇒ 直接 open（等价资源管理器双击，不弹任何框）；
+        ///   · 多选 ⇒ **先弹确认框**列出文件（防误开一堆窗口），确认后走同一个 Task；
+        ///   · 执行 = Task{Type="open", Target="", Files 全量} ⇒ 执行器 U-D 循环体
+        ///     逐文件追加各自引号路径（每个文件一次，天然并发，不串行）。
+        /// </summary>
+        private void OpenSelectedFiles(Context ctx)
+        {
+            var files = ctx != null ? ctx.Files : null;
+            if (files == null || files.Count == 0)
+            {
+                Log("打开选中文件: 无可用的选中文件（采集为空）");
+                return;
+            }
+
+            try
+            {
+                if (files.Count > 1)
+                {
+                    var sb = new StringBuilder();
+                    sb.AppendLine("将同时打开 " + files.Count + " 个文件：");
+                    sb.AppendLine();
+                    int max = Math.Min(files.Count, 8);
+                    for (int i = 0; i < max; i++)
+                    {
+                        string n;
+                        try { n = Path.GetFileName(files[i]); } catch { n = files[i]; }
+                        sb.AppendLine("  " + (i + 1) + ". " + n);
+                    }
+                    if (files.Count > max) sb.AppendLine("  …（其余 " + (files.Count - max) + " 个）");
+                    sb.AppendLine();
+                    sb.Append("继续吗？");
+
+                    var r = WinFormsMessageBox.Show(sb.ToString(), "RunEver · 打开选中文件",
+                        System.Windows.Forms.MessageBoxButtons.YesNo,
+                        System.Windows.Forms.MessageBoxIcon.Question,
+                        System.Windows.Forms.MessageBoxDefaultButton.Button2);
+                    if (r != System.Windows.Forms.DialogResult.Yes)
+                    {
+                        Log("打开选中文件: 用户取消（" + files.Count + " 个）");
+                        return;
+                    }
+                }
+
+                var t = new Executor.Task
+                {
+                    Type = "open",
+                    Target = "",
+                    Files = new List<string>(files),
+                    Log = s => Log("  " + s)
+                };
+                _executor.Execute(t);
+                Log("打开选中文件: " + files.Count + " 个已派发");
+            }
+            catch (Exception ex)
+            {
+                Log("打开选中文件失败: " + ex.Message);
+                NotifyUser("打开选中文件失败", ex.Message);
             }
         }
 

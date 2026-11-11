@@ -25,15 +25,27 @@ namespace RunEverCs.Views
 
             sp.Children.Add(SettingsKit.SectionHeader("触发"));
 
+            // ★ 2026-11-11：输入框显示「键名」而不是 AHK 标识（!q → Alt+Q）。
+            //   显示与存储分离：界面给人话，auto.conf 仍写 AHK 写法
+            //   （AHK 触发器与 RegisterHotKey 都按 AHK 写法解析）。
+            Func<string> currentDisplay = () =>
+            {
+                RunEverCs.Services.HotkeySpec s0; string e0;
+                string raw = Get("hotkey", "`");
+                return RunEverCs.Services.HotkeySpec.TryParse(raw, out s0, out e0)
+                    ? s0.ToDisplay() : raw;
+            };
+            string pendingAhk = null;   // 按键捕获后的 AHK 写法，等 LostFocus 落盘
+
             var hotkeyBox = new TextBox
             {
-                Text = Get("hotkey", "`"),
+                Text = currentDisplay(),
                 Width = 150,
-                // ★ B4b-4：组合键最长形如 "#^+F24"（5 字符）⇒ 上限 6，防手滑粘一大段进来
-                MaxLength = 6,
+                // ★ 键名比 AHK 写法长（如 Ctrl+Alt+Shift+F24 有 18 字符）⇒ 放宽容度
+                MaxLength = 24,
                 Padding = new Thickness(6, 4, 6, 4),
                 VerticalContentAlignment = VerticalAlignment.Center,
-                ToolTip = "按一个键即可填入；支持 F1–F24 与 Space（显示为 Space）；Backspace 清空"
+                ToolTip = "按一个键即可填入（显示为键名）；也可手输 Ctrl+Alt+A / 反引号 / 空格；Backspace 清空"
             };
             var hotkeyRow = SettingsKit.Row("弹出热键",
                 "按一个键即可填入（Backspace 清空）；支持 F1–F24 与 Space；单字母/数字需配 Ctrl/Alt",
@@ -73,18 +85,59 @@ namespace RunEverCs.Views
                 if ((mods & System.Windows.Input.ModifierKeys.Shift) != 0) sb.Append('+');
                 if ((mods & System.Windows.Input.ModifierKeys.Windows) != 0) sb.Append('#');
                 sb.Append(ch);
-                hotkeyBox.Text = sb.ToString();
+                pendingAhk = sb.ToString();
+                RunEverCs.Services.HotkeySpec dsp; string derr;
+                hotkeyBox.Text = RunEverCs.Services.HotkeySpec.TryParse(pendingAhk, out dsp, out derr)
+                    ? dsp.ToDisplay() : pendingAhk;
                 e.Handled = true;
             };
             hotkeyBox.LostFocus += (s, e) =>
             {
                 // ★ B4b-4：不能用 `Text.Trim()` —— 纯空格会被抹成空串，热键静默回落默认值
-                string v = SettingsKit.TrimHotkeyText(hotkeyBox.Text);
-                if (v != Get("hotkey", "`")) Set("hotkey", v);
+                string shown = SettingsKit.TrimHotkeyText(hotkeyBox.Text);
+
+                // ① 空 = 清空
+                if (shown.Length == 0)
+                {
+                    pendingAhk = null;
+                    hotkeyBox.Text = "";
+                    if (Get("hotkey", "") != "") Set("hotkey", "");
+                    return;
+                }
+
+                // ② 按键捕获过 ⇒ 用那份 AHK 写法；③ 手输 ⇒ 先 AHK 写法、再键名写法
+                string want = pendingAhk;
+                if (string.IsNullOrEmpty(want))
+                {
+                    RunEverCs.Services.HotkeySpec hk; string err;
+                    if (!RunEverCs.Services.HotkeySpec.TryParseDisplay(shown, out hk, out err))
+                    {
+                        // 认不出来 ⇒ 还原显示，绝不写坏值（坏值会让托盘静默回落默认键）
+                        hotkeyBox.Text = currentDisplay();
+                        return;
+                    }
+                    want = hk.Text;
+                }
+                pendingAhk = null;
+
+                if (want != Get("hotkey", "`")) Set("hotkey", want);
+                hotkeyBox.Text = currentDisplay();   // 回显规范化键名
             };
 
             sp.Children.Add(SettingsKit.Card(
                 hotkeyRow,
+                // ★ 2026-11-11：鼠标触发（长按右键）。C# 侧 MouseTrigger 读这两个键；
+                //   改完关掉设置窗即触发 ApplyMouseTrigger（托盘重挂/卸钩子）。
+                SettingsKit.Combo("鼠标触发",
+                    "长按右键弹菜单；短按照常弹系统右键菜单，按住拖动仍走系统拖放",
+                    new[] { "关", "长按右键" },
+                    Get("mouseTrigger", "off") == "holdRight" ? "长按右键" : "关",
+                    v => Set("mouseTrigger", v == "长按右键" ? "holdRight" : "off")),
+                SettingsKit.Text("长按判定（毫秒）",
+                    "200–3000；太短会把点得慢的正常右键误判成长按，500 为稳妥值",
+                    Get("holdMs", "500"),
+                    v => { int n = PInt(v, 500); return SetInt("holdMs", n < 200 ? 200 : (n > 3000 ? 3000 : n)); },
+                    90),
                 SettingsKit.Toggle("启用自动执行",
                     "选中文本 → 匹配插件 → 直接执行，不弹菜单",
                     GetBool("enabled", true), v => SetBool("enabled", v)),

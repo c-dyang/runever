@@ -66,6 +66,20 @@
 顺序由 `auto.conf` 的 `menuOrder` 决定（默认 `dynamic,process,always`）。**某槽位当次为空就整块不出现** ——
 没选中东西又没配 `fallback` 时，「进程」自然排到第一位，这不是顺序失效。
 
+## 可视化配置
+
+不写配置文件也能把 RunEver 调顺：**托盘右键 → 打开设置**。
+
+| 页 | 干什么 |
+|---|---|
+| **触发与行为** | 弹出热键（显示为键名，如 `Alt+Q`）、**鼠标触发**（长按右键 + 判定毫秒数）、自动执行开关 |
+| **菜单显示** | 隐藏缺件、执行窗口、三槽位顺序、文件夹展开为子菜单、批量上限 |
+| **条目编辑** | **树形编辑器**：拖拽建层级、右键增删改、换名换图标；保存走往返校验，不丢条目 |
+| **插件** | 列出 `config\functions\*.ahk`，看命中式 / 输出类型 / 启用状态，一键刷新 |
+| **日志 / 诊断 / 关于** | 看运行日志、路径缓存、版本与现役件 |
+
+改完**保存即生效** —— 热键与鼠标触发会现场重注册，不用重启托盘。
+
 ## 配置
 
 全部在 `config\` 下，纯文本，改完托盘右键「重载配置」即刻生效（不用重启）。
@@ -114,6 +128,54 @@
 > 旧版曾有 `uiBackend`（win32/wpf）与 `captureBackend`（ahk/native）两个可切后端，**2026-11-08 起取消**：
 > 采集固定走 AHK 管道、菜单固定走 Win32。旧配置里留着这两行会被忽略，不报错。
 
+## 插件（AHK 脚本）
+
+插件 = 一个 `.ahk` 文件 + 若干行 `global RVE_FN_*` 元数据。丢进 `config\functions\` 即生效。
+
+> 改完请点**托盘右键 →「刷新插件」**。命令行 `--refresh-plugins` 只写缓存文件，
+> 运行中的托盘有内存缓存（`cacheSeconds`，默认 300s），不点那个菜单要等它过期。
+
+**两种形态**
+
+| | 形态 A（零代码） | 形态 B（带逻辑） |
+|---|---|---|
+| 判据 | 写了 `RVE_FN_Tpl` | 不写 `Tpl`，自带 `Run(text)` |
+| 用途 | 拼个 URL / 打开路径 | 要判断、要提取、要拦危险参数 |
+| 例子 | 打开网址、顺丰查询 | 百度网盘分享直达、Choco 命令 |
+
+```ahk
+; 形态 A：选中快递单号 → 拼成轨迹页打开
+global RVE_FN_Name  := "德邦快递查询"
+global RVE_FN_Match := "^DP[A-Za-z0-9]{8,}$"
+global RVE_FN_Out   := "url"
+global RVE_FN_Tpl   := "https://www.deppon.com/track/ordertrack?orderNumList=%22{0}%22"
+```
+
+```ahk
+; 形态 B：选中网盘分享描述 → 提取链接与提取码 → 拼 ?pwd= 打开
+Run(text) {
+    if !RegExMatch(text, "(https?://pan\.baidu\.com/s/[^\s`"'<>，。；、]+)", &m)
+        return ""
+    vUrl := m[1]
+    ...
+    return (vPwd = "") ? vUrl : vUrl "?pwd=" vPwd
+}
+```
+
+**三层权限**（声明即定档，核心不仲裁）
+
+| 层 | 声明 | 行为 |
+|---|---|---|
+| **L1 接管** | `Out="intercept"` | 插件自己弹 UI；`Run` 返回非空 = 接管成功，返回空 / 异常 / 超时 8s = 回落核心菜单 |
+| **L2 派发** | `Out` = `run/open/url/action/send/keys` | 命中即执行，跳过弹菜单 |
+| **L3 菜单** | `RVE_FN_Menu := true` | 不自动派发，作为菜单项追加到 `always` 段末尾 |
+
+> `Out` 只能写 `action`，**不能写 `cmd`**（后者会被报「未知动作类型」）。
+> 形态 B 的 `Match` 只是粗筛，危险动作必须在 `Run()` 里再做一次白名单。
+
+**不需要安装 AutoHotkey**：插件执行复用随包的 `CaptureRunner.exe` —— 它以 AutoHotkey v2 作编译底座、
+支持 `/script` 执行外部脚本，所以「采集器顺带就是插件解释器」。
+
 ## 下载与安装
 
 到 [**Releases**](https://github.com/c-dyang/runever/releases) 拿最新的 `RunEver-*.zip`（便携包，含本体 + 示例配置 + 转换资产）：
@@ -123,6 +185,7 @@
 3. 选一个文件 / 一段文字，按热键
 
 **系统要求**：Windows 10 / 11 + .NET Framework 4.8（系统自带）。Everything 可选（有则路径解析更快）。
+**不需要安装 AutoHotkey** —— 插件运行时由随包的 `CaptureRunner.exe` 自带。
 
 ## 从源码构建
 
@@ -140,7 +203,7 @@ dotnet build cs\RunEverCs.csproj -c Release
 
 ## 自检
 
-22 套无人值守自检，一键跑：
+23 套无人值守自检，一键跑：
 
 ```powershell
 pwsh -File .\run-selftests.ps1 -Exe "cs\bin\Release\RunEverCs.exe" -OutDir state\selftest
@@ -149,9 +212,9 @@ pwsh -File .\run-selftests.ps1 -Exe "cs\bin\Release\RunEverCs.exe" -OutDir state
 单套：`RunEverCs.exe --selftest <root> <out.txt>`、`--selftest-search`、`--selftest-iconurl`、`--selftest-menu` …
 
 覆盖：解析器 / 写回器 / 模板 / 插件编辑 / 路径缓存 / 判定匹配 / 隐藏规则 / 自动执行 / 执行器 / 采集链 /
-WebDAV / 配置写回 / 热重载 / 目录选择 / 菜单编辑页 / 菜单渲染 / URL 图标 / 插件三形态 / 全库搜索 / 自检自身。
+WebDAV / 配置写回 / 热重载 / 目录选择 / 菜单编辑页 / 菜单渲染 / URL 图标 / 插件三形态 / 全库搜索 / 长按右键判定 / 自检自身。
 
-每次改完必须跑；**22 套全绿才算没坏**。
+每次改完必须跑；**23 套全绿才算没坏**（`menu` 套有一项 `U-B⑨` 是已知历史失败，见 Issues）。
 
 ## 边界（它有意不做的事）
 

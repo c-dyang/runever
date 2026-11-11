@@ -46,6 +46,7 @@ Add-Case "menueditor" @("--selftest-menueditor", $root) # ★ v9 新增：树形
 Add-Case "arch"       @("--selftest-arch", $root)      # ★ 拆-0 新增：分层引用方向（白名单 = 已知违规，按文件+类型）
 Add-Case "iconurl"    @("--selftest-iconurl", $root)   # ★ U-C 新增：图标源支持网址（favicon 缓存 + 协议白名单 + 不阻塞）
 Add-Case "search"     @("--selftest-search", $root)    # ★ S1 新增：全库搜索（虚拟固定项 + 拼音 + 可见集合同口径）
+Add-Case "mousetrigger" @("--selftest-mousetrigger", $root) # ★ 2026-11-11 新增：长按右键判定（夹取 / 状态机 / 拖放边界 / 一次性）
 Add-Case "selftest"   @("--selftest", $root)           # 总自检：报告固定落 state\selftest-cs.txt
 
 $hash = (Get-FileHash $Exe -Algorithm SHA256).Hash

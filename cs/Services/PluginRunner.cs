@@ -25,6 +25,7 @@ namespace RunEverCs.Services
     {
         private readonly string _root;
         private readonly string _ahkExe;
+        private readonly string _runnerExe;   // 采集器：编译版 .exe 自带解释器，可 /script 跑插件
         private readonly string _tmpDir;
         private readonly Action<string> _log;
 
@@ -36,6 +37,8 @@ namespace RunEverCs.Services
         {
             _root = root;
             _ahkExe = ResolveAhkExe(root, ahkExe, log);
+            try { _runnerExe = new CaptureClient(root, ahkExe).RunnerPath; }
+            catch (Exception ex) { if (log != null) log("  插件运行: 取采集器路径失败: " + ex.Message); }
             _tmpDir = Path.Combine(root, "state", "autotmp");
             _log = log;
             TimeoutMs = timeoutMs;
@@ -180,8 +183,24 @@ namespace RunEverCs.Services
             try
             {
                 var psi = new ProcessStartInfo();
-                psi.FileName = _ahkExe;
-                psi.Arguments = "\"" + drvFile + "\" \"" + inFile + "\" \"" + outFile + "\"";
+                // ★ 2026-11-11（用户定案「把解释器包在采集器里」）：
+                //   采集器若是编译版 .exe，它本就以 AutoHotkey64.exe 作 base 编出，
+                //   支持 /script 执行外部脚本 ⇒ 插件复用它，**不再依赖系统安装 AHK**。
+                //   （以 .bin 作 base 的产物不支持 /script —— 那种情况退回系统 AHK。）
+                bool useRunner = !string.IsNullOrEmpty(_runnerExe)
+                    && _runnerExe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                    && File.Exists(_runnerExe);
+
+                if (useRunner)
+                {
+                    psi.FileName = _runnerExe;
+                    psi.Arguments = "/script \"" + drvFile + "\" \"" + inFile + "\" \"" + outFile + "\"";
+                }
+                else
+                {
+                    psi.FileName = _ahkExe;
+                    psi.Arguments = "\"" + drvFile + "\" \"" + inFile + "\" \"" + outFile + "\"";
+                }
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 psi.WindowStyle = ProcessWindowStyle.Hidden;
