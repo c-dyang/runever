@@ -4,7 +4,7 @@
 
 <h1>RunEver</h1>
 
-<p><strong>按一下热键，弹出一份只跟「此刻」有关的菜单。</strong></p>
+<p><strong>选中什么，就只给什么。</strong></p>
 
 [![GitHub Release](https://img.shields.io/github/v/release/c-dyang/runever?label=Release&color=blue&style=flat)](https://github.com/c-dyang/runever/releases)
 [![GitHub Stars](https://img.shields.io/github/stars/c-dyang/runever?logo=github&label=Stars&color=yellow&style=flat)](https://github.com/c-dyang/runever/stargazers)
@@ -14,8 +14,11 @@
 
 </div>
 
-选一个文件、一段文字、或者一个文件夹，按热键——RunEver 看你**选中了什么、前台是什么程序、在哪个目录**，
-从条目库里筛出这一瞬该出现的那一小撮，拼成一棵 **Win32 原生菜单**，点完即走。
+## 是什么
+
+**Windows 右键菜单增强。** 选中一个文件、一段文字或一个文件夹，按热键——菜单里只出现跟它相关的几项，点完即走。
+
+不用记快捷键，不用翻工具列表，不用想「该用哪个软件」。
 
 > 它不回答「我能用什么工具」，只回答**「对这个东西、这个场景，我能做什么」**。
 
@@ -27,13 +30,16 @@
 ## ✨ 核心特性
 
 - **情境判定**：`ext / proc / folder / text` 多槽位组合——**同一个文件，在不同程序、不同目录下给不同菜单**
-- **原生菜单**：Win32 `TrackPopupMenu`——系统级图标、`&` 助记键、真子菜单，不自己画控件
 - **一键直达**：扩展名槽位只匹配到**唯一**可执行条目时直接执行，不弹菜单
-- **文件夹展开**：`open sub <目录>` 在渲染期枚举子项成子菜单，**绝不写回配置**
 - **全库搜索**：菜单末项 → 即时过滤全库有效条目（名称子串 + **拼音首字母/全拼**），Enter 直接执行
+- **零运行时依赖**：.NET Framework 4.8（系统自带）+ 编译好的 AHK 采集器，无安装器
+
+### 更多能力
+
+- **原生菜单**：Win32 `TrackPopupMenu`——系统级图标、`&` 助记键、真子菜单，不自己画控件
+- **文件夹展开**：`open sub <目录>` 在渲染期枚举子项成子菜单，**绝不写回配置**
 - **图标全自动**：目标本身是网址的条目自动取站点 favicon；**条目图标不手填**
 - **插件系统**：AHK 插件 + 三层声明——**接管（intercept） / 命中派发 / 菜单追加（Menu=true）**
-- **零运行时依赖**：.NET Framework 4.8（系统自带）+ 编译好的 AHK 采集器，无安装器
 - **22 套无人值守自检**：判定 / 渲染 / 采集 / 插件 / 搜索 / 同步……全绿才算没坏
 
 ## 它怎么工作
@@ -169,7 +175,7 @@ WebDAV / 配置写回 / 热重载 / 目录选择 / 菜单编辑页 / 菜单渲�
 
 ## 说明
 
-个人自用工具，按自己的使用习惯长出来；示例条目也只是示例。已在 Windows 10 / 11 + .NET Framework 4.8 验证，
+按个人使用习惯长出来的工具，示例条目也只是示例。已在 Windows 10 / 11 + .NET Framework 4.8 验证，
 Linux / macOS 不适用（Win32 菜单与注册表强依赖）。
 
 问题或想法欢迎开 Issue。
