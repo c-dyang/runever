@@ -161,6 +161,12 @@ namespace RunEverCs.Services
         /// <summary>WM_TIMER 的定时器 id（TrayApp 在消息回调里按它分流）。</summary>
         public const int TimerId = 0x5257;
 
+        /// <summary>钩子 → 主线程的「请你补发一个右键事件」请求（WM_APP+83）。</summary>
+        public const int WM_REPLAY = 0x8000 + 0x53;
+
+        /// <summary>WM_REPLAY 的 wParam：1 = 补发按下，0 = 补发抬起。</summary>
+        public const int ReplayDown = 1;
+
         private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
 
         [StructLayout(LayoutKind.Sequential)]
@@ -211,6 +217,9 @@ namespace RunEverCs.Services
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool KillTimer(IntPtr hWnd, int nIDEvent);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostMessageW(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern IntPtr GetModuleHandleW(string lpModuleName);
@@ -294,8 +303,26 @@ namespace RunEverCs.Services
             return fire;
         }
 
-        /// <summary>补发一次右键事件（带魔数，防自触发）。</summary>
-        private void Replay(bool down)
+        /// <summary>
+        /// 请求补发（**只在钩子回调里调用**）：只投递一条消息，立即返回。
+        ///
+        /// ★★ 2026-11-11 致命 bug 修复点：**钩子回调里绝不能调 SendInput**。
+        ///   注入的事件会**立刻重新进入钩子链**（PowerToys #5040 原话：
+        ///   "as soon as SendInput is called the next hook event gets processed"），
+        ///   于是本进程在钩子回调里同步等待自己的下一个回调 ⇒ 消息泵卡死。
+        ///   实测症状（用户机器，EnableLUA=0）：长按右键失效 + 热键无响应 + 进程杀不掉。
+        ///   同款现象见 SO 62662606「程序停止响应」、SO 60236649「延迟 400ms」。
+        ///   ⇒ 回调里只做内存操作 + SetTimer/KillTimer + PostMessage（全部非阻塞）。
+        /// </summary>
+        private void RequestReplay(bool down)
+        {
+            if (_hwnd == IntPtr.Zero) return;
+            try { PostMessageW(_hwnd, WM_REPLAY, down ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero); }
+            catch { }
+        }
+
+        /// <summary>真正执行补发（**必须由主线程在收到 WM_REPLAY 时调用**）。</summary>
+        public void DoReplay(bool down)
         {
             try
             {
@@ -337,9 +364,9 @@ namespace RunEverCs.Services
                 {
                     if (_state.OnMove(s.Pt.X, s.Pt.Y))
                     {
-                        // 进入拖放：取消长按判定，并把「按下」补还给系统
+                        // 进入拖放：取消长按判定，并把「按下」补还给系统（投递，不注入）
                         if (_hwnd != IntPtr.Zero) KillTimer(_hwnd, TimerId);
-                        Replay(true);
+                        RequestReplay(true);
                     }
                     return CallNextHookEx(_hook, nCode, wParam, lParam);
                 }
@@ -356,8 +383,9 @@ namespace RunEverCs.Services
                         return CallNextHookEx(_hook, nCode, wParam, lParam);   // 拖放 ⇒ 放行
 
                     // 短按：系统从没见过按下 ⇒ 补一次完整点击，系统右键菜单照常弹
-                    Replay(true);
-                    Replay(false);
+                    //   （★ 只投递，实际 SendInput 在主线程做 —— 回调里直接注入会卡死消息泵）
+                    RequestReplay(true);
+                    RequestReplay(false);
                     return (IntPtr)1;                     // 原始 UP 吞掉，避免重复
                 }
             }

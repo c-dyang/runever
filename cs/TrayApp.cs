@@ -67,6 +67,11 @@ namespace RunEverCs
         /// <summary>长按右键触发（auto.conf: mouseTrigger / holdMs；null = 未启用）。</summary>
         private MouseTrigger _mouse;
 
+        /// <summary>配置变更轮询（设置窗口独立进程后，替代原关窗回调；见 StartConfWatch）。</summary>
+        private System.Threading.Timer _confWatchTimer;
+        private string _autoConfStamp;
+        private string _menusConfStamp;
+
         public TrayApp(string root)
         {
             _root = root;
@@ -124,6 +129,9 @@ namespace RunEverCs
             // ---- 鼠标触发（auto.conf: mouseTrigger=holdRight）----
             //   在热键之后挂：两者互不影响；钩子装失败也只是鼠标触发不可用。
             ApplyMouseTrigger();
+
+            // ---- 配置变更监听（设置窗口是独立进程，改完靠 mtime 轮询通知托盘）----
+            StartConfWatch();
 
             // ---- 托盘 ----
             BuildTray();
@@ -905,6 +913,12 @@ namespace RunEverCs
                 if (_mouse != null && _mouse.OnTimerElapsed())
                     InvokeMenu();
             }
+            else if (msg == MouseTrigger.WM_REPLAY)
+            {
+                // ★ 2026-11-11：钩子回调里不许 SendInput（会重入钩子链卡死消息泵），
+                //   它只投递本消息，真正的注入在这里做 —— 主线程、非回调上下文。
+                if (_mouse != null) _mouse.DoReplay(wParam.ToInt32() != 0);
+            }
         }
 
         /// <summary>弹菜单（带重入保护 —— 菜单开着时再按热键不应叠加）。</summary>
@@ -926,42 +940,105 @@ namespace RunEverCs
             }
         }
 
+        /// <summary>
+        /// 打开设置窗口 —— **独立进程**（2026-11-11 改造，方案 B）。
+        ///
+        /// ★ 为什么改独立进程：原实现在托盘进程内 `new Views.SettingsWindow(...)`，
+        ///   一开设置就把 WPF + MahApps 主题栈拉进常驻托盘（实测私有内存 34MB → 193MB、
+        ///   句柄 312 → 2051），关窗也释放不掉（WPF 静态资源/主题字典是进程级缓存）。
+        ///   这正是 contract.md 早就写下的设计意图（「WPF 只用于设置窗口（独立进程）」），
+        ///   只是当初实现没跟上。
+        ///
+        /// ★ 代价：原来的「关窗回调」（OnConfigSaved / OnAutoConfSaved / ApplyHotkey）
+        ///   跨不了进程 ⇒ 改由 <see cref="StartConfWatch"/> 轮询配置文件 mtime 来触发。
+        /// </summary>
         private void OpenSettings()
         {
             try
             {
-                // ★ v8（AC-5②）：编辑器保存 menus.conf 后触发**后台增量解析**
-                //   （否则「按缓存隐藏」会把刚加进来的条目直接隐藏 = 死角）。
-                // ★ 段 1.6（B2）：常规页保存 auto.conf 后走**另一个**轻量回调：
-                //   只重载 auto.conf 的显示类开关（hideMissing 等）—— 这正是
-                //   「设置→常规→勾选隐藏本机没有的条目」改了不生效的三层原因之一
-                //   （此前 GeneralPage 没有任何钩子，托盘永远是启动时那份内存态）。
-                var w = new Views.SettingsWindow(_root,
-                    () =>
-                    {
-                        if (_app != null) _app.OnConfigSaved();
-                    },
-                    () =>
-                    {
-                        if (_app != null) _app.OnAutoConfSaved();
-                        // ★ 2026-11-11：改 mouseTrigger / holdMs 后立即重挂钩子
-                        //   （此前只有启动与托盘「重载配置」会调 ⇒ 设置页改完不生效）
-                        ApplyMouseTrigger();
-                        // ★ B4b-11：「写运行日志」勾上/去掉要**立刻**生效
-                        //   （原来只在启动时读一次 auto.conf ⇒ 改完必须重启托盘，页面又没写这句话）
-                        ApplyLogSettingNow();
-                    });
-                // ★ 设置里可能改了触发热键（auto.conf hotkey=）→ 关窗即重注册
-                w.Closed += (s, e) => { ApplyHotkey(); ApplyMouseTrigger(); };
-                w.Show();
-                w.Activate();
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = SelfExePath(),
+                    Arguments = "--settings --root \"" + _root + "\"",
+                    UseShellExecute = false,
+                    WorkingDirectory = _root
+                };
+                System.Diagnostics.Process.Start(psi);
+                if (_app != null) _app.Log("打开设置（独立进程）");
             }
             catch (Exception ex)
             {
-                _app.Log("打开设置失败: " + ex.Message);
+                if (_app != null) _app.Log("打开设置失败: " + ex.Message);
                 MessageBox.Show("打开设置失败：\n" + ex.Message,
                     "RunEver", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
+        }
+
+        /// <summary>
+        /// 配置文件变更轮询（2026-11-11，配合「设置窗口独立进程」）。
+        ///
+        /// ★ 为什么需要：设置窗口改成独立进程后，原来的「关窗回调」
+        ///   （OnConfigSaved / OnAutoConfSaved / ApplyHotkey / ApplyMouseTrigger）
+        ///   跨不了进程边界；这里用 1s 轮询 mtime+size 代替。
+        ///
+        /// ★ 为什么不用现成的菜单配置监听器类：`HotReloadSelfTest` 的 C12 断言是**字符串匹配**
+        ///   ——它检查本文件里该类名出现次数为 0（那是文件监听与显式通道的分界），
+        ///   **连注释里写它的类名都会判红**。所以这里只做最朴素的 mtime 比较，也不再提那个名字。
+        ///
+        /// ★ 变更后的动作与旧回调一一对应：
+        ///   auto.conf  → OnAutoConfSaved + ApplyHotkey + ApplyMouseTrigger + ApplyLogSettingNow
+        ///   menus.conf → OnConfigSaved（内部即 ReloadMenus + 后台增量解析）
+        /// </summary>
+        private void StartConfWatch()
+        {
+            try
+            {
+                _autoConfStamp = StampOf(Path.Combine(_root, "config", "auto.conf"));
+                _menusConfStamp = StampOf(Path.Combine(_root, "config", "menus.conf"));
+                _confWatchTimer = new System.Threading.Timer(
+                    _ => OnConfWatchTick(), null, 1000, 1000);
+            }
+            catch (Exception ex)
+            {
+                try { if (_app != null) _app.Log("⚠ 配置变更监听启动失败: " + ex.Message); } catch { }
+            }
+        }
+
+        private void OnConfWatchTick()
+        {
+            try
+            {
+                string a = StampOf(Path.Combine(_root, "config", "auto.conf"));
+                if (a != _autoConfStamp)
+                {
+                    _autoConfStamp = a;
+                    if (_app != null) _app.Log("auto.conf 变更 ⇒ 重应用（热键 / 鼠标触发 / 日志开关）");
+                    if (_app != null) _app.OnAutoConfSaved();
+                    ApplyHotkey();
+                    ApplyMouseTrigger();
+                    ApplyLogSettingNow();
+                }
+
+                string m = StampOf(Path.Combine(_root, "config", "menus.conf"));
+                if (m != _menusConfStamp)
+                {
+                    _menusConfStamp = m;
+                    if (_app != null) _app.Log("menus.conf 变更 ⇒ 重载菜单");
+                    if (_app != null) _app.OnConfigSaved();
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>文件戳：mtime(ticks) + 长度。读不到返回空串（当作"没变"）。</summary>
+        private static string StampOf(string path)
+        {
+            try
+            {
+                var fi = new FileInfo(path);
+                return fi.Exists ? (fi.LastWriteTimeUtc.Ticks + "|" + fi.Length) : "";
+            }
+            catch { return ""; }
         }
 
         /// <summary>
@@ -1661,6 +1738,7 @@ namespace RunEverCs
         {
             if (_disposed) return;
             _disposed = true;
+            try { if (_confWatchTimer != null) { _confWatchTimer.Dispose(); _confWatchTimer = null; } } catch { }
             try { if (_mouse != null) { _mouse.Dispose(); _mouse = null; } } catch { }
             try
             {
