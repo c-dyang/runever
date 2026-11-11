@@ -45,6 +45,18 @@
 ;
 ;   ★ 互斥：intercept + Menu 同时声明 ⇒ intercept 优先，Menu 被忽略
 ;
+; ── 2.5 组合约束（扫描期就拒收 —— 写错 = 插件根本不出现）──────
+;   ★ 危险输出（action / send / keys）的 Tpl **不能含 {0}**
+;     原因：执行器对目标不做转义/白名单，选中文本会原样进命令行 ⇒ 命令注入；
+;     形态 A 没有 Run() 这道闸门。Tpl 不含 {0} 的固定命令不受限制。
+;     要拼选中文本 ⇒ 改成形态 B，在 Run(text) 里校验后再返回目标。
+;
+;   ★ Menu := true 时 **必须给 Tpl**
+;     否则菜单项目标是空串 ⇒ 点了没反应的死项。
+;     形态 B 要动态目标 ⇒ 用 Out="intercept" 接管，不要用 Menu。
+;
+;   ★ 互斥：intercept + Menu 同时出现 ⇒ intercept 优先（Menu 被忽略）
+;
 ; ── 3. 形态 B 的 Run(text) 契约 ─────────────────────────────
 ;   · 入参 = 选中文本（可能多行、带前后空白）
 ;   · 返回 = 执行目标字符串；返回空串 = 主动放弃 ⇒ 回落弹菜单
@@ -84,19 +96,30 @@ global RVE_FN_Icon  := "chrome.exe"
 ;
 ; ── 8. 样例 2 · 形态 B（带逻辑：Run(text) 返回目标）────────
 global RVE_FN_Name  := "执行 Chocolatey 命令"
-global RVE_FN_Match := "^choco\s+(install|upgrade)\b"
+global RVE_FN_Match := "^choco\s+(install|upgrade|uninstall)\b"
 global RVE_FN_Whole := false
 global RVE_FN_Prio  := 200
 global RVE_FN_Out   := "action"
 global RVE_FN_Show  := true
 ;
-; 下面是形态 B 的脚本体 —— 不属于配置块，导入时会被忽略：
+; 下面是形态 B 的脚本体 —— 不属于配置块，导入时会被忽略。
+;
+; ★★ 注意：**这个样例只演示"闸门长什么样"，不是生产级安全实现。**
+;    真要执行命令，请自己补全参数解析（这里只挡了最明显的危险写法）。
 Run(text) {
     vCmd := Trim(text, " `t`r`n")
-    if (vCmd = "")
+
+    ; 闸门 1：动词白名单（Match 只是粗筛，这里才是硬边界）
+    if !RegExMatch(vCmd, "i)^choco\s+(install|upgrade|uninstall)\b")
         return ""
-    ; 危险参数二次校验（Match 挡不住）
-    if RegExMatch(vCmd, "i)\s(--all|--force)\s*$")
+
+    ; 闸门 2：危险参数（--all 动全部包；--force 强制覆盖）
+    if RegExMatch(vCmd, "i)\s(--all|-y\s+--all|--force)\s*$")
         return ""
+
+    ; 闸门 3：多行直接拒绝（可能夹带第二条命令）
+    if (InStr(vCmd, "`n") || InStr(vCmd, "`r"))
+        return ""
+
     return vCmd
 }

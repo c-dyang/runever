@@ -173,8 +173,17 @@ namespace RunEverCs.Services
                 return null;
             }
 
-            info.BadReason = CheckOutType(info.Out);
+            info.BadReason = JoinBad(CheckOutType(info.Out), CheckCombination(info));
             return info;
+        }
+
+        /// <summary>把多条错误拼成 BadReason（空项自动省略）。</summary>
+        private static string JoinBad(params string[] parts)
+        {
+            var errs = new List<string>();
+            foreach (var s in parts)
+                if (!string.IsNullOrEmpty(s)) errs.Add(s);
+            return string.Join("；", errs.ToArray());
         }
 
         /// <summary>
@@ -202,6 +211,10 @@ namespace RunEverCs.Services
                 string outErr = CheckOutType(info.Out);
                 if (outErr.Length > 0) errs.Add(outErr);
             }
+
+            // ★ 组合约束（危险输出带 {0} / Menu 无 Tpl）—— 粘贴导入同样要挡
+            string combErr = CheckCombination(info);
+            if (combErr.Length > 0) errs.Add(combErr);
 
             info.BadReason = string.Join("；", errs.ToArray());
             return info;
@@ -295,6 +308,44 @@ namespace RunEverCs.Services
         /// ★ "cmd" 必须单独报错（历史炸点）：执行器只认 action；
         ///   插件里写 `RVE_FN_Out := "cmd"` ⇒ 运行期「未知动作类型: cmd」。
         /// </summary>
+        /// <summary>
+        /// 组合约束校验（2026-11-11 加入）—— **单个键合法不代表组合合法**。
+        ///
+        /// ① 危险输出（action / send / keys）的 Tpl 不允许含 {0}：
+        ///    `Executor.DoCmd` 对 target **不做任何转义或白名单**，直接 `cmd /c`；
+        ///    形态 A 没有 Run() 这道闸门，若 Tpl 里带 {0}，选中文本会原样进命令行 ⇒ 命令注入。
+        ///    （Tpl 不含 {0} 的固定命令是安全的，不禁 —— 别把合法用法一起打死。）
+        ///
+        /// ② Menu=true 但没有 Tpl：`RunEverApp` 构建菜单项时
+        ///    `Target = string.IsNullOrEmpty(p.Tpl) ? "" : p.Tpl.Replace("{0}", text)`
+        ///    ⇒ 生成一个**点了没反应的死项**。形态 B 要动态目标请用 `Out="intercept"` 接管。
+        /// </summary>
+        public static string CheckCombination(PluginInfo p)
+        {
+            if (p == null) return "";
+
+            string outType = (p.Out ?? "").Trim().ToLowerInvariant();
+            bool dangerous = outType == "action" || outType == "send" || outType == "keys";
+
+            if (dangerous && !string.IsNullOrEmpty(p.Tpl)
+                && p.Tpl.IndexOf("{0}", StringComparison.Ordinal) >= 0)
+            {
+                return "危险输出（" + outType + "）的 Tpl 不能含 {0}："
+                     + "选中文本会被原样拼进命令行（命令注入）。"
+                     + "请改用形态 B —— 去掉 Tpl，在 Run(text) 里做白名单校验后再返回目标";
+            }
+
+            // ★ 例外：intercept 是形态 B（无 Tpl）却常被顺手写上 Menu ——
+            //   代码语义是「intercept 优先，Menu 被忽略」，属**合法**声明，不拒载。
+            if (p.Menu && string.IsNullOrEmpty(p.Tpl) && outType != "intercept")
+            {
+                return "RVE_FN_Menu := true 必须有 Tpl（菜单项的目标由 Tpl 展开）；"
+                     + "形态 B 要动态目标请用 Out=\"intercept\" 接管";
+            }
+
+            return "";
+        }
+
         public static string CheckOutType(string outType)
         {
             string v = (outType ?? "").Trim().ToLowerInvariant();
