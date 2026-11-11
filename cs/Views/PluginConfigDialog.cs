@@ -184,71 +184,71 @@ namespace RunEverCs.Views
         // 默认内容
         // ============================================================
 
-        /// <summary>未选中插件：契约 + 两个成品样例（只读展示）。</summary>
+        /// <summary>
+        /// 未选中插件：编写契约（**外置模板 + 运行时参数注入**），只读展示。
+        ///
+        /// ★ 为什么外置（2026-11-11 用户定案）：这段文本是 AI 写插件的**唯一输入**，
+        ///   契约措辞会频繁改；写死在 C# 里 ⇒ 每改一句文案都要重编译。
+        ///   外置后只改 txt，程序不用动。
+        ///
+        /// ★ 但「运行时参数」必须由代码注入（超时 / 缓存秒数 / 路径 / 执行宿主）：
+        ///   这些才是会随版本变、且变错就跑不起来的东西。同一次已经踩过：
+        ///   契约里写着「用 AutoHotkey64.exe 执行」，实际早已改成 CaptureRunner.exe /script。
+        ///
+        /// ★ 查找顺序：config\plugin-contract.txt（用户覆盖）→ templates\plugin-contract.txt（出厂）→ 兜底提示。
+        /// </summary>
         private string BuildDocText()
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("; ============================================================");
-            sb.AppendLine("; RunEver 插件 · 配置块（格式契约 + 成品样例）");
-            sb.AppendLine("; ============================================================");
-            sb.AppendLine(";");
-            sb.AppendLine("; 格式只有一种（不是 YAML / JSON）：每行一个键");
-            sb.AppendLine(";     global RVE_FN_<键名> := 值");
-            sb.AppendLine(";   字符串用双引号；布尔写 true/false；数字裸写");
-            sb.AppendLine(";   行尾 ; 之后是注释（引号内的 ; 不算注释）");
-            sb.AppendLine(";");
-            sb.AppendLine("; （key = 键名 / req = 必需 / def = 默认值;  - = 无）");
-            sb.AppendLine("; key      req   def      description");
-            sb.AppendLine("; Name     yes   -        插件名（菜单 / 命中提示里显示）");
-            sb.AppendLine("; Match    yes   -        匹配式（正则；Whole=true 时按整段匹配）");
-            sb.AppendLine("; Out      yes   -        run / open / url / action / send / keys / intercept");
-            sb.AppendLine("; Whole    no    true     整段匹配（false = 允许包含）");
-            sb.AppendLine("; Prio     no    100      优先级（大者先匹配）");
-            sb.AppendLine("; Tpl      no    -        目标模板，{0} = 选中文本（有它 = 形态 A）");
-            sb.AppendLine("; Icon     no    -        图标源：chrome.exe / 全路径 / SHELL32.dll,71");
-            sb.AppendLine("; Show     no    inherit  显示执行窗口（true / false；inherit = 跟随 auto.conf）");
-            sb.AppendLine("; Enabled  no    true     是否启用");
-            sb.AppendLine("; Arg      no    text     选中数据类型");
-            sb.AppendLine("; Menu     no    false    是否进菜单（true = 追加到 always 段末尾，且不自动派发）");
-            sb.AppendLine(";");
-            sb.AppendLine("; ★ Out 不能写 \"cmd\" —— 要执行命令请写 \"action\"");
-            sb.AppendLine(";   （历史炸点：写 cmd ⇒ 执行器报「未知动作类型: cmd」）");
-            sb.AppendLine("; ★ 形态 A = 有 Tpl（零代码）；形态 B = 无 Tpl（插件自带 Run(text)）");
-            sb.AppendLine(";");
-            sb.AppendLine("; ★ 三层权限（声明即定档，核心不仲裁）");
-            sb.AppendLine(";   L1 接管  Out=\"intercept\"：命中后核心不建菜单、不派发、不追加，");
-            sb.AppendLine(";            插件在自己的 Run(text) 里弹自己的菜单；返回非空 = 接管成功，");
-            sb.AppendLine(";            返回空串 / 异常 / 超时（8s）= 接管失败 ⇒ 回落核心菜单");
-            sb.AppendLine(";   L2 派发  Out=run/open/url/action/send/keys：命中后直接执行，跳过弹菜单");
-            sb.AppendLine(";   L3 菜单  RVE_FN_Menu := true：不自动派发，作为菜单项追加到 always 段末尾");
-            sb.AppendLine(";            （标题 = 插件名，无快捷键，目标 = Tpl，{0} = 弹出时的选中文本）");
-            sb.AppendLine(";   ★ 互斥：intercept 与 Menu 同时声明 ⇒ intercept 优先（Menu 忽略）");
-            sb.AppendLine(";");
-            sb.AppendLine("; ===== 样例 1 · 形态 A（纯模板，零代码）=====");
-            sb.AppendLine("global RVE_FN_Name  := \"德邦快递查询\"");
-            sb.AppendLine("global RVE_FN_Match := \"^DP[A-Za-z0-9]{8,}$\"");
-            sb.AppendLine("global RVE_FN_Whole := true");
-            sb.AppendLine("global RVE_FN_Prio  := 100");
-            sb.AppendLine("global RVE_FN_Out   := \"url\"");
-            sb.AppendLine("global RVE_FN_Tpl   := \"https://www.deppon.com/track/ordertrack?orderNumList=%22{0}%22\"");
-            sb.AppendLine("global RVE_FN_Icon  := \"chrome.exe\"");
-            sb.AppendLine(";");
-            sb.AppendLine("; ===== 样例 2 · 形态 B（带逻辑：Run(text) 返回目标）=====");
-            sb.AppendLine("global RVE_FN_Name  := \"执行 Chocolatey 命令\"");
-            sb.AppendLine("global RVE_FN_Match := \"^choco\\s+(install|upgrade)\\b\"");
-            sb.AppendLine("global RVE_FN_Whole := false");
-            sb.AppendLine("global RVE_FN_Prio  := 200");
-            sb.AppendLine("global RVE_FN_Out   := \"action\"");
-            sb.AppendLine("global RVE_FN_Show  := true");
-            sb.AppendLine(";");
-            sb.AppendLine("; 下面是形态 B 的脚本体 —— 不属于配置块，导入时会被忽略：");
-            sb.AppendLine("Run(text) {");
-            sb.AppendLine("    vCmd := Trim(text, \" `t`r`n\")");
-            sb.AppendLine("    if (vCmd = \"\")");
-            sb.AppendLine("        return \"\"");
-            sb.AppendLine("    return vCmd");
-            sb.AppendLine("}");
-            return sb.ToString().TrimEnd('\r', '\n');
+            string text = null;
+            string[] candidates =
+            {
+                Path.Combine(_root, "config", "plugin-contract.txt"),
+                Path.Combine(_root, "templates", "plugin-contract.txt")
+            };
+            foreach (string p in candidates)
+            {
+                try
+                {
+                    if (File.Exists(p)) { text = File.ReadAllText(p, Encoding.UTF8); break; }
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrEmpty(text))
+            {
+                return "; 插件编写契约缺失\r\n"
+                     + ";   期望文件：<root>\\templates\\plugin-contract.txt\r\n"
+                     + ";   或覆盖：  <root>\\config\\plugin-contract.txt\r\n"
+                     + "; 重新解压发布包可恢复。";
+            }
+
+            // ── 运行时参数注入（单一源 = 代码常量 / auto.conf，绝不写死在模板里）──
+            int cacheSeconds = 300;
+            try
+            {
+                var dict = AutoConfStore.Read(Path.Combine(_root, "config", "auto.conf"));
+                if (dict != null)
+                {
+                    foreach (var kv in dict)
+                    {
+                        if (string.Equals(kv.Key, "cacheSeconds", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int.TryParse((kv.Value ?? "").Trim(), out cacheSeconds);
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return text
+                .Replace("{{TIMEOUT_MS}}", "3000")
+                .Replace("{{INTERCEPT_TIMEOUT_MS}}", RunEverCs.RunEverApp.InterceptTimeoutMs.ToString())
+                .Replace("{{CACHE_SECONDS}}", cacheSeconds.ToString())
+                .Replace("{{LOG_PATH}}", Path.Combine(_root, "state", "runever-cs.log"))
+                .Replace("{{FUNCTIONS_DIR}}", Path.Combine(_root, "config", "functions"))
+                .Replace("{{RUNNER}}", "CaptureRunner.exe")
+                .TrimEnd('\r', '\n');
         }
 
         /// <summary>选中插件：该插件的配置块（+ 形态 B 的 Run() 摘要，全部是注释行）。</summary>

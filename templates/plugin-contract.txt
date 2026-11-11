@@ -1,0 +1,102 @@
+; ============================================================
+; RunEver 插件 · 编写契约（整段复制给 AI 即可）
+; contract-version: 2026-11-11
+; ============================================================
+;
+; 本文件可改文案；带双花括号的占位符由程序注入运行时真值，不要手改。
+; 想本地覆盖：复制到 config\plugin-contract.txt（优先于本文件）。
+;
+; ── 0. 文件约定（不遵守 = 直接加载不了）────────────────────
+;   · 首行必须：  #Requires AutoHotkey v2.0
+;   · 存成 UTF-8 无 BOM（GBK / 带 BOM ⇒ 中文乱码、正则失配）
+;   · 落盘：{{FUNCTIONS_DIR}}\<名字>.ahk
+;   · AHK v2 的转义符是「反引号」不是反斜杠：
+;       字面双引号 → `"     字面反引号 → ``     换行 → `n     Tab → `t
+;     ★ 正则里要匹配双引号，写 [^`"]；写成 [^""] 会语法报错
+;
+; ── 1. 元数据（每行一个键，必须带 global）──────────────────
+;   global RVE_FN_<键> := 值
+;   字符串双引号；布尔 true/false；数字裸写；; 之后是注释
+;
+;   key      req   def      说明
+;   Name     yes   -        插件名（菜单 / 命中提示显示）
+;   Match    yes   -        匹配正则（只是粗筛，不是安全边界）
+;   Out      yes   -        run / open / url / action / send / keys / intercept
+;   Whole    no    true     整段匹配（false = 包含即可）
+;   Prio     no    100      优先级，大者先匹配
+;   Tpl      no    -        目标模板，{0} = 选中文本（有它 = 形态 A）
+;   Icon     no    -        图标源：chrome.exe / SHELL32.dll,71
+;   Show     no    inherit  显示执行窗口（true/false；inherit = 跟随 auto.conf）
+;   Enabled  no    true     是否启用
+;   Arg      no    text     选中数据类型
+;   Menu     no    false    进菜单（true = 追加到 always 段末尾且不自动派发）
+;
+;   ★ Out 不能写 "cmd" —— 要执行命令写 "action"（否则报「未知动作类型: cmd」）
+;   ★ 有 Tpl = 形态 A（零代码）；无 Tpl = 形态 B（自带 Run(text)）
+;
+; ── 2. 三层权限（声明即定档，核心不仲裁）────────────────────
+;   L1 接管  Out="intercept"：核心不建菜单、不派发；插件自己在 Run(text) 里弹 UI。
+;            Run 返回非空 = 接管成功；返回空 / 异常 / 超时 {{INTERCEPT_TIMEOUT_MS}}ms = 失败 ⇒ 回落核心菜单
+;
+;   L2 派发  Out=run/open/url/action/send/keys：命中即执行，跳过弹菜单
+;
+;   L3 菜单  RVE_FN_Menu := true：不派发，作为菜单项追加到 always 段末尾
+;            （标题 = 插件名，无快捷键，目标 = Tpl，{0} = 弹出时的选中文本）
+;
+;   ★ 互斥：intercept + Menu 同时声明 ⇒ intercept 优先，Menu 被忽略
+;
+; ── 3. 形态 B 的 Run(text) 契约 ─────────────────────────────
+;   · 入参 = 选中文本（可能多行、带前后空白）
+;   · 返回 = 执行目标字符串；返回空串 = 主动放弃 ⇒ 回落弹菜单
+;   · 时限 = {{TIMEOUT_MS}}ms；超时被杀 ⇒ 回落弹菜单
+;   · Run() 里只做「判断 + 拼目标」，不要下载 / 安装 / 等窗口（会超时）
+;   · 抛异常 = 放弃（不会崩核心，只是回落菜单）
+;
+; ── 4. 安全（必须做，Match 挡不住）─────────────────────────
+;   危险动作（action / send / keys）必须在 Run() 里再拦一次：
+;     ① 命令白名单   ② 危险参数检查（--all / --force 之类）   ③ 多行直接拒绝
+;
+; ── 5. 失败时会怎样（排查用）───────────────────────────────
+;   · 起不来 / 脚本报错 / 超时 ⇒ 一律回落弹核心菜单（不会崩）
+;   · 日志：{{LOG_PATH}}
+;        「插件执行异常: …」                  = 进程都没起来
+;        「插件 xxx 未产出目标 → 回落弹菜单」  = 起来了但没结果
+;   · 「按了没反应」先分清：没命中（Match 不匹配）还是命中但失败（看上面两行）
+;
+; ── 6. 生成后怎么验（四步，缺一步不算完）───────────────────
+;   ① 语法：AutoHotkey64.exe /ErrorStdOut /validate <file>
+;   ② 元数据：Out 必须是那 7 个合法值之一
+;   ③ 刷新：托盘右键「刷新插件」
+;        （命令行 --refresh-plugins 只写缓存文件，托盘有 {{CACHE_SECONDS}}s 内存缓存，不点菜单要等它过期）
+;   ④ 真跑：造一段匹配 Match 的文本触发一次，核对目标
+;        形态 B 还要测「返回空串 ⇒ 不执行、回落菜单」
+;
+;   运行时：插件由 {{RUNNER}} 以 /script 执行（自带解释器，用户无需安装 AutoHotkey）
+;
+; ── 7. 样例 1 · 形态 A（纯模板，零代码）────────────────────
+global RVE_FN_Name  := "德邦快递查询"
+global RVE_FN_Match := "^DP[A-Za-z0-9]{8,}$"
+global RVE_FN_Whole := true
+global RVE_FN_Prio  := 100
+global RVE_FN_Out   := "url"
+global RVE_FN_Tpl   := "https://www.deppon.com/track/ordertrack?orderNumList=%22{0}%22"
+global RVE_FN_Icon  := "chrome.exe"
+;
+; ── 8. 样例 2 · 形态 B（带逻辑：Run(text) 返回目标）────────
+global RVE_FN_Name  := "执行 Chocolatey 命令"
+global RVE_FN_Match := "^choco\s+(install|upgrade)\b"
+global RVE_FN_Whole := false
+global RVE_FN_Prio  := 200
+global RVE_FN_Out   := "action"
+global RVE_FN_Show  := true
+;
+; 下面是形态 B 的脚本体 —— 不属于配置块，导入时会被忽略：
+Run(text) {
+    vCmd := Trim(text, " `t`r`n")
+    if (vCmd = "")
+        return ""
+    ; 危险参数二次校验（Match 挡不住）
+    if RegExMatch(vCmd, "i)\s(--all|--force)\s*$")
+        return ""
+    return vCmd
+}
