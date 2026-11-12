@@ -257,6 +257,16 @@ namespace RunEverCs.Services
 
                     var target = stack[stack.Count - 1];
 
+                    // ★ 条目型分割线（配置文件里一行 `---`）：
+                    //   · 只在"当前菜单已有内容"时插，避免首条就是分割线、或连续两条粘在一起；
+                    //   · 不占命令 ID、不进 IdMap、不参与点击派发（纯渲染）；
+                    //   · 不改变 stack，因此它不打断父子连续性（层级不变式不受影响）。
+                    if (it.IsSeparator)
+                    {
+                        if (target.Count() > 0) target.AddSeparator();
+                        continue;
+                    }
+
                     if (it.IsGroupHeader)
                     {
                         // 分组标题 → 建真子菜单
@@ -463,7 +473,8 @@ namespace RunEverCs.Services
                 int visible = 0;
                 while (j < items.Count && items[j] != null && items[j].Level > it.Level)
                 {
-                    if (!items[j].IsGroupHeader) visible++;
+                    // 分割线不是"可点条目"，不能让一个只含分割线的空壳子菜单逃过剪枝
+                    if (!items[j].IsGroupHeader && !items[j].IsSeparator) visible++;
                     j++;
                 }
 

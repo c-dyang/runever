@@ -499,9 +499,16 @@ namespace RunEverCs
                         ActionType x;
                         if (IsCjk(p.Key) || !MenuEditorPage.TryParseActionTypeKey(p.Key, out x)) tagsLegal = false;
                     }
-                    Chk("⑳b 下拉 = 7 项、显示全中文互不重复、Tag 全是合法英文键",
-                        pairs.Count == 7 && seenDisp.Count == 7 && tagsLegal,
-                        "项数=" + pairs.Count + " 去重显示=" + seenDisp.Count + " Tag合法=" + tagsLegal);
+                    Chk("⑳b 下拉项数 = 映射表长度、显示全中文互不重复、Tag 全是合法英文键",
+                        pairs.Count == MenuEditorPage.ActionTypeMap.Length
+                        && seenDisp.Count == pairs.Count && tagsLegal,
+                        "项数=" + pairs.Count + " 映射表=" + MenuEditorPage.ActionTypeMap.Length
+                        + " 去重显示=" + seenDisp.Count + " Tag合法=" + tagsLegal);
+                    // 分隔符必须在表里，且显示文本是「分隔符」、落盘键是 ---
+                    bool sepOk = false;
+                    foreach (var p in pairs)
+                        if (p.Value == "分隔符" && p.Key == "---") sepOk = true;
+                    Chk("⑳b2 下拉含「分隔符」且落盘键 = ---", sepOk, sepOk ? "" : "映射表里没有 (\"---\",\"分隔符\")");
 
                     // ③ 非法值：cmd / 空串 / 中文显示文本 一律拒绝，且条目类型原样不动
                     probe.Type = ActionType.Send;

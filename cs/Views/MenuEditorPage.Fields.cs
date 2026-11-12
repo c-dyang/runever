@@ -416,6 +416,8 @@ namespace RunEverCs.Views
                 case ActionType.Action: return "action";
                 case ActionType.Send: return "send";
                 case ActionType.Keys: return "keys";
+                // 分割线不是动作：menus.conf 里的原文就是一行 ---
+                case ActionType.Separator: return "---";
                 default: return "group";
             }
         }
@@ -435,7 +437,10 @@ namespace RunEverCs.Views
             new KeyValuePair<string, string>("url",    "网址"),
             new KeyValuePair<string, string>("action", "执行命令"),
             new KeyValuePair<string, string>("send",   "发送文本"),
-            new KeyValuePair<string, string>("keys",   "发送按键")
+            new KeyValuePair<string, string>("keys",   "发送按键"),
+            // ★ 2026-11-12：分割线（配置里写作一行 `---`）。没有标题/目标/快捷键，
+            //   只在菜单里产生一条横线；选它即把当前条目变成分割线条目。
+            new KeyValuePair<string, string>("---",    "分隔符")
         };
 
         /// <summary>枚举 → **落盘用的英文键**（= `menus.conf` 里的值）。</summary>
@@ -467,6 +472,8 @@ namespace RunEverCs.Views
                 case "action": t = ActionType.Action; return true;
                 case "send": t = ActionType.Send; return true;
                 case "keys": t = ActionType.Keys; return true;
+                // 分隔符：落盘键就是配文里的 `---`，与 TypeStr(Separator) 对称
+                case "---": t = ActionType.Separator; return true;
                 default: return false;
             }
         }
@@ -481,8 +488,18 @@ namespace RunEverCs.Views
             ActionType t;
             if (!TryParseActionTypeKey(key, out t))
                 return "动作类型「" + key + "」不是合法值，已忽略（只能是 "
-                    + "group / run / open / url / action / send / keys）";
+                    + "group / run / open / url / action / send / keys / ---）";
             it.Type = t;
+            // ★ 分割线没有标题/目标/快捷键/flag/sub：在这里一次性清干净。
+            //   否则这些字段留在内存里，保存时被 FormatItem 丢掉 ⇒ 用户以为改了但没落盘。
+            if (t == ActionType.Separator)
+            {
+                it.Title = "";
+                it.Hotkey = "";
+                it.Target = "";
+                it.Flag = ActionFlag.None;
+                it.Sub = false;
+            }
             return "";
         }
 

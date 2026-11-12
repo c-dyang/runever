@@ -14,7 +14,7 @@ namespace RunEverCs.Models
         Fallback
     }
 
-    /// <summary>动作类型（对应执行器的 7 种）。</summary>
+    /// <summary>动作类型（对应执行器的 7 种 + 1 种非执行型：分割线）。</summary>
     public enum ActionType
     {
         Group,
@@ -23,7 +23,14 @@ namespace RunEverCs.Models
         Url,
         Action,
         Send,
-        Keys
+        Keys,
+
+        /// <summary>
+        /// 分割线（配置里写作一行 `---`，缩进决定它插在哪个父菜单里）。
+        /// ★ 不参与执行、不占命令 ID、不打断层级不变式：
+        ///   它只影响渲染，父子连续性判定里当"透明节点"处理。
+        /// </summary>
+        Separator
     }
 
     /// <summary>action 的显示/隐藏标记。</summary>
@@ -63,6 +70,9 @@ namespace RunEverCs.Models
         public string IconSource { get; set; } = "";
 
         public bool IsGroupHeader => Type == ActionType.Group;
+
+        /// <summary>配置里的分割线条目（一行 `---`）。</summary>
+        public bool IsSeparator => Type == ActionType.Separator;
 
         public MenuItem Clone()
         {

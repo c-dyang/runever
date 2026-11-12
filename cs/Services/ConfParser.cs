@@ -149,6 +149,10 @@ namespace RunEverCs.Services
                 {
                     if (p.IsGroupHeader) continue;    // 已经是 group：只保留，不计数
 
+                    // ★ 分割线永不升格：它是纯渲染节点，下面即便有更深缩进（配置写歪了），
+                    //   也由 MenuBuilder 的渲染护栏处理，绝不把它变成子菜单标题。
+                    if (p.IsSeparator) continue;
+
                     string lostTarget = (p.Target ?? "").Trim();
 
                     p.Type = ActionType.Group;
@@ -279,6 +283,25 @@ namespace RunEverCs.Services
             int level = leading / 2;
 
             string content = rawLine.Trim(' ', '\t');
+
+            // ★ 分割线条目：整行只有 `---`（缩进决定它落在哪个父菜单里）。
+            //   必须在 `|` 拆分与快捷键正则之前判，否则会被当成"标题为 --- 的 group 条目"。
+            //   语义约束：不占 Level 之外的任何字段、不执行、不占 ID（见 MenuItem.IsSeparator）。
+            if (content == "---")
+            {
+                Groups[groupIdx].Items.Add(new MenuItem
+                {
+                    Title = "",
+                    Hotkey = "",
+                    Type = ActionType.Separator,
+                    Flag = ActionFlag.None,
+                    Sub = false,
+                    Target = "",
+                    Level = level,
+                    Line = lineNo
+                });
+                return;
+            }
 
             // 拆分 标题部分 / 动作部分
             string titlePart;

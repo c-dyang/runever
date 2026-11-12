@@ -134,7 +134,15 @@ namespace RunEverCs.Views
                 if (h != null) h(this, new System.ComponentModel.PropertyChangedEventArgs(name));
             }
 
-            public string Title { get { return Item.Title; } }
+            public string Title
+            {
+                get
+                {
+                    // 分割线没有标题：给一个可辨认的占位，否则树里是一行空白（点了也不知道点了啥）
+                    if (Item.Type == ActionType.Separator) return "——— 分割线 ———";
+                    return Item.Title;
+                }
+            }
 
             /// <summary>组头（`group` 类型 = 纯分组标题）加粗，与普通条目区分。</summary>
             public FontWeight TitleWeight
@@ -151,6 +159,11 @@ namespace RunEverCs.Views
                 get
                 {
                     var parts = new List<string>();
+                    if (Item.Type == ActionType.Separator)
+                    {
+                        parts.Add("separator（menus.conf 里写作一行 ---）");
+                        return "  " + string.Join("  ·  ", parts.ToArray());
+                    }
                     if (!string.IsNullOrEmpty(Item.Hotkey)) parts.Add("_" + Item.Hotkey);
                     parts.Add(Item.Type == ActionType.Group ? "group" : TypeStr(Item.Type));
                     if (!string.IsNullOrEmpty(Item.Target)) parts.Add(Item.Target);

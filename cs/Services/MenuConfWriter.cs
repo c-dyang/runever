@@ -254,22 +254,44 @@ namespace RunEverCs.Services
                     {
                         Add(issues, BadActionType, it, gi, g.Name, i, lineNo,
                             "动作类型 " + (int)it.Type + " 不是合法值"
-                            + "（只能 group/run/open/url/action/send/keys）");
+                            + "（只能 group/run/open/url/action/send/keys/---）");
+                    }
+
+                    // ⑤b 分割线不允许带标题/目标/快捷键/flag/sub —— 写出去会被丢掉，
+                    //     在这里先报出来，别让用户以为改了却没落盘。
+                    if (it.IsSeparator)
+                    {
+                        var extra = new List<string>();
+                        if (!string.IsNullOrEmpty((it.Title ?? "").Trim())) extra.Add("标题「" + it.Title.Trim() + "」");
+                        if (!string.IsNullOrEmpty((it.Target ?? "").Trim())) extra.Add("目标");
+                        if (!string.IsNullOrEmpty((it.Hotkey ?? "").Trim())) extra.Add("快捷键");
+                        if (it.Flag != ActionFlag.None) extra.Add("hide/show");
+                        if (it.Sub) extra.Add("sub");
+                        if (extra.Count > 0)
+                        {
+                            Add(issues, BadActionType, it, gi, g.Name, i, lineNo,
+                                "是分割线（---）却带着 " + string.Join(" / ", extra.ToArray())
+                                + " —— 保存时这些字段会被丢弃，只留一行 ---");
+                        }
                     }
 
                     // ⑥ 同一菜单内条目 ID 唯一（身份键 = 标题+快捷键+动作+flag+目标）
-                    string key = IdentityKey(it);
-                    MenuItem first;
-                    if (idSeen.TryGetValue(key, out first))
+                    //    ★ 分割线不参与判重：同一菜单里可以有多条分割线，它们的身份键天然相同。
+                    if (!it.IsSeparator)
                     {
-                        string reason = "与同一菜单里第 " + (items.IndexOf(first) + 1)
-                            + " 条「" + (first.Title ?? "").Trim() + "」完全重复（标题/快捷键/动作/目标都一样）"
-                            + " ⇒ 菜单里两条无法区分，等于同一条目占了两个 ID";
-                        Add(issues, DuplicateId, it, gi, g.Name, i, lineNo, reason);
-                    }
-                    else
-                    {
-                        idSeen[key] = it;
+                        string key = IdentityKey(it);
+                        MenuItem first;
+                        if (idSeen.TryGetValue(key, out first))
+                        {
+                            string reason = "与同一菜单里第 " + (items.IndexOf(first) + 1)
+                                + " 条「" + (first.Title ?? "").Trim() + "」完全重复（标题/快捷键/动作/目标都一样）"
+                                + " ⇒ 菜单里两条无法区分，等于同一条目占了两个 ID";
+                            Add(issues, DuplicateId, it, gi, g.Name, i, lineNo, reason);
+                        }
+                        else
+                        {
+                            idSeen[key] = it;
+                        }
                     }
                 }
 
@@ -420,6 +442,13 @@ namespace RunEverCs.Services
             //    曾写成 Level*2+2（=4，4/2=2）⇒ 往返后所有条目 Level 都 +1，
             //    属于会静默损坏配置的严重 bug（由往返自检抓出）。
             sb.Append(new string(' ', Math.Max(0, it.Level) * 2 + 1));
+
+            // 分割线：整行只有 `---`（往返逐字节幂等要求：不能带标题/动作/尾随空格）
+            if (it.Type == ActionType.Separator)
+            {
+                sb.Append("---");
+                return sb.ToString();
+            }
 
             sb.Append(it.Title);
             if (!string.IsNullOrEmpty(it.Hotkey))

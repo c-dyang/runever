@@ -239,6 +239,61 @@ namespace RunEverCs
                 sb.AppendLine("  [INFO] 现役 menus.conf 空目标条数 = " + CountEmptyTargets(p1.Groups)
                     + "（0 = 无非法配置；保存时不阻断、仅在状态行警告，见 MenuEditorPage.OnSave）");
 
+                // ---- 分割线条目（一行 `---`）：解析 / 往返 / 缩进 / 不误判非法 ----
+                {
+                    string sepConf = Path.Combine(Path.GetDirectoryName(outFile), "writer-separator.conf");
+                    string sepText = "! 组A  always\n"
+                        + "   条目1  _1  | run  notepad.exe\n"
+                        + "   ---\n"
+                        + "   条目2  _2  | run  calc.exe\n"
+                        + "\n"
+                        + "! 组B  always\n"
+                        + "   条目3  _3  | url  https://example.com\n"
+                        + "   ---\n";
+                    File.WriteAllText(sepConf, sepText, new UTF8Encoding(false));
+
+                    var sp = new ConfParser(sepConf);
+                    sp.Parse();
+                    int sepCount = 0;
+                    foreach (var g in sp.Groups)
+                        foreach (var it in g.Items)
+                            if (it.IsSeparator) sepCount++;
+                    chk(sepCount == 2, "分割线：两条 `---` 被识别为 Separator（实得 " + sepCount + "）", "");
+
+                    var firstSep = sp.Groups[0].Items.Find(x => x.IsSeparator);
+                    chk(firstSep != null && firstSep.Level == 1,
+                        "分割线：缩进决定 Level（3 空格 ⇒ Level=1）",
+                        firstSep == null ? "未找到" : "Level=" + firstSep.Level);
+                    chk(firstSep != null && firstSep.Title == "" && firstSep.Target == "",
+                        "分割线：不带标题/目标", "");
+
+                    string sepOut = MenuConfWriter.Serialize(sp.Groups);
+                    // 逐行找 `---`（不依赖换行符风格：写入侧可能用 \r\n），断缩进 = Level*2+1 = 3
+                    bool sepIndentOk = false;
+                    foreach (var ln in sepOut.Replace("\r\n", "\n").Split('\n'))
+                    {
+                        if (ln.Trim() != "---") continue;
+                        int lead = ln.Length - ln.TrimStart(' ').Length;
+                        if (lead == 3) { sepIndentOk = true; break; }
+                    }
+                    chk(sepIndentOk, "分割线：序列化回写为缩进 3 空格的 `---`", "");
+
+                    File.WriteAllText(sepConf, sepOut, new UTF8Encoding(false));
+                    var sp2 = new ConfParser(sepConf);
+                    sp2.Parse();
+                    int sep2 = 0;
+                    foreach (var g in sp2.Groups)
+                        foreach (var it in g.Items)
+                            if (it.IsSeparator) sep2++;
+                    chk(sep2 == sepCount, "分割线：写回再解析数量守恒（" + sep2 + " = " + sepCount + "）", "");
+
+                    chk(CountEmptyTargets(sp.Groups) == 0,
+                        "分割线：不被计入「空目标非法配置」",
+                        "实得 " + CountEmptyTargets(sp.Groups));
+
+                    try { File.Delete(sepConf); } catch { }
+                }
+
                 // ---- 清理测试目录 ----
                 try { Directory.Delete(workDir, true); } catch { }
 
@@ -270,6 +325,8 @@ namespace RunEverCs
                 foreach (var it in g.Items)
                 {
                     if (it == null || it.Type == ActionType.Group) continue;
+                    // 分割线没有目标天经地义（它不是执行条目），不能算"非法配置"
+                    if (it.IsSeparator) continue;
                     if (string.IsNullOrEmpty(it.Target) || it.Target.Trim().Length == 0) n++;
                 }
             }

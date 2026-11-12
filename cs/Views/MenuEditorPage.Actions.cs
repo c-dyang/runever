@@ -570,6 +570,7 @@ namespace RunEverCs.Views
         /// <summary>
         /// 目标为空的条目数（D-5：保存后警告用；自检侧另有对应报告）。
         /// ★ `group` 类型（纯分组标题）目标**本来就空** ⇒ 不计入。
+        /// ★ 分割线（---）没有目标天经地义 ⇒ 也不计入（否则每加一条横线就报一条"非法"）。
         /// </summary>
         private int CountEmptyTargets()
         {
@@ -581,6 +582,7 @@ namespace RunEverCs.Views
                 foreach (var it in g.Items)
                 {
                     if (it == null || it.Type == ActionType.Group) continue;
+                    if (it.IsSeparator) continue;
                     if (string.IsNullOrEmpty(it.Target) || it.Target.Trim().Length == 0) n++;
                 }
             }
