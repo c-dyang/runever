@@ -985,12 +985,35 @@ namespace RunEverCs
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = SelfExePath(),
-                    Arguments = "--settings --root \"" + _root + "\"",
+                    // ★ 2026-11-12 修：**必须经 QuoteArg(NormalizePathForCmd) 归一化**。
+                    //   旧写法 `"--settings --root \"" + _root + "\""` 在「exe 与 config 同级」的
+                    //   部署布局下会拼出 `--root "D:\…\RunEver-20261107\"`（_root 来自 FindRoot 的
+                    //   `return dir;` 分支，BaseDirectory 天然带尾反斜杠）⇒ 末尾 `\"` 被当**转义引号**
+                    //   ⇒ 子进程实际收到 `D:\…\RunEver-20261107"`（多一个引号）⇒ net48 上
+                    //   `Path.Combine` 自己就抛「路径中具有非法字符」⇒ 设置内容区全空，
+                    //   且崩溃日志路径由同一个坏 root 拼出 ⇒ 日志也写不进去。
+                    //   这就是 :369-381「B3 三条硬规则」在**设置子进程**上的复刻，勿再手写引号。
+                    Arguments = "--settings --root " + QuoteArg(NormalizePathForCmd(_root))
+                                + " --parent-pid " + System.Diagnostics.Process.GetCurrentProcess().Id,
                     UseShellExecute = false,
                     WorkingDirectory = _root
                 };
-                System.Diagnostics.Process.Start(psi);
-                if (_app != null) _app.Log("打开设置（独立进程）");
+                var settingsProc = System.Diagnostics.Process.Start(psi);
+                if (settingsProc != null)
+                {
+                    // 顺手淘汰已退出的旧记录，避免列表越长越多
+                    lock (_settingsProcs)
+                    {
+                        _settingsProcs.RemoveAll(x =>
+                        {
+                            try { return x == null || x.HasExited; } catch { return true; }
+                        });
+                        _settingsProcs.Add(settingsProc);
+                    }
+                }
+                if (_app != null)
+                    _app.Log("打开设置（独立进程）pid="
+                        + (settingsProc != null ? settingsProc.Id.ToString() : "?"));
             }
             catch (Exception ex)
             {
@@ -1764,12 +1787,52 @@ namespace RunEverCs
         [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
         private static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
 
+        /// <summary>
+        /// 由本托盘拉起的设置窗口进程（2026-11-12，托盘↔设置联动关闭）。
+        ///
+        /// 设置是**独立进程**（8b7c496：WPF 栈不再常驻托盘，省 ~160MB 私有内存），
+        /// 代价是托盘退出不会带走它 —— 用户看到的现象就是「关掉托盘，设置窗口还在」，
+        /// 且这时窗口里的「保存」仍能写盘、却没有托盘重新加载 ⇒ 僵尸窗口。
+        /// 这里在托盘退出时统一收尾（另一条保险在 Program.StartParentWatch：父进程没了子进程自己退）。
+        /// </summary>
+        private readonly System.Collections.Generic.List<System.Diagnostics.Process> _settingsProcs
+            = new System.Collections.Generic.List<System.Diagnostics.Process>();
+
+        /// <summary>托盘退出时关闭所有由自己拉起的设置进程。先礼后兵：CloseMainWindow → 1.5s → Kill。</summary>
+        private void CloseSettingsProcesses()
+        {
+            System.Diagnostics.Process[] arr;
+            lock (_settingsProcs)
+            {
+                arr = _settingsProcs.ToArray();
+                _settingsProcs.Clear();
+            }
+            if (arr.Length == 0) return;
+
+            foreach (var p in arr)
+            {
+                try { p.Refresh(); if (!p.HasExited) p.CloseMainWindow(); }   // WPF 收 WM_CLOSE 正常关窗
+                catch { }
+            }
+            foreach (var p in arr)
+            {
+                try
+                {
+                    if (p.HasExited) continue;
+                    if (!p.WaitForExit(1500)) p.Kill();                       // 关不掉（模态框/卡死）就强杀
+                }
+                catch { }
+            }
+            try { if (_app != null) _app.Log("退出联动：已关闭设置进程 " + arr.Length + " 个"); } catch { }
+        }
+
         private bool _disposed;
 
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+            try { CloseSettingsProcesses(); } catch { }
             try { if (_confWatchTimer != null) { _confWatchTimer.Dispose(); _confWatchTimer = null; } } catch { }
             try { if (_mouse != null) { _mouse.Dispose(); _mouse = null; } } catch { }
             try

@@ -207,22 +207,17 @@ namespace RunEverCs
         {
             app.DispatcherUnhandledException += (s, e) =>
             {
-                try
-                {
-                    string logPath = Path.Combine(root, "state", "settings-crash.log");
-                    File.AppendAllText(logPath,
-                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " "
-                        + e.Exception.GetType().Name + ": " + e.Exception.Message
-                        + Environment.NewLine + e.Exception.StackTrace
-                        + Environment.NewLine + new string('-', 60) + Environment.NewLine,
-                        new UTF8Encoding(false));
-                }
-                catch { }
+                string logPath = AppendCrashLog(root,
+                    e.Exception.GetType().Name + ": " + e.Exception.Message
+                    + Environment.NewLine + e.Exception.StackTrace
+                    + Environment.NewLine + new string('-', 60));
 
                 MessageBox.Show(
                     "操作出错（程序会继续运行）：\n\n"
                     + e.Exception.Message + "\n\n"
-                    + "详细信息已记录到 state\\settings-crash.log",
+                    + (logPath != null
+                        ? "详细信息已记录到 " + logPath
+                        : "⚠ 详细信息**没能落盘**（日志目录不可写，见下方原因）；报错里的路径/权限问题通常就是日志写不出去的同源原因。"),
                     "RunEver", MessageBoxButton.OK, MessageBoxImage.Warning);
 
                 e.Handled = true;   // ★ 阻止进程终止
@@ -230,16 +225,46 @@ namespace RunEverCs
 
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
             {
+                AppendCrashLog(root, "[Domain] " + e.ExceptionObject
+                    + Environment.NewLine + new string('-', 60));
+            };
+        }
+
+        /// <summary>
+        /// 追加一条崩溃记录，返回**真正写进去的路径**；一处都写不进去返回 null。
+        ///
+        /// ★ 2026-11-12 改造（旧实现的三个缺陷）：
+        ///   ① 路径计算写在 try 里、失败一律 `catch { }` —— 而「root 带非法字符」这类异常
+        ///      **会让 `Path.Combine` 自己就抛**（net48 实测），于是日志一个字节没写；
+        ///   ② 弹框文案无条件宣称「详细信息已记录到 …」⇒ 骗人，用户去翻日志必然扑空；
+        ///   ③ 没有兜底落点 —— root 不可用时本该退到 exe 目录或临时目录。
+        ///   现在按 root\state → exe\state → %TEMP%\RunEver 三级降级，并把真实结果回给调用方。
+        /// </summary>
+        private static string AppendCrashLog(string root, string body)
+        {
+            var cands = new System.Collections.Generic.List<string>();
+            try { if (!string.IsNullOrEmpty(root)) cands.Add(Path.Combine(root, "state")); } catch { }
+            try { cands.Add(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "state")); } catch { }
+            try { cands.Add(Path.Combine(Path.GetTempPath(), "RunEver")); } catch { }
+
+            string lastErr = null;
+            foreach (string dir in cands)
+            {
                 try
                 {
-                    string logPath = Path.Combine(root, "state", "settings-crash.log");
-                    File.AppendAllText(logPath,
-                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " [Domain] " + e.ExceptionObject
-                        + Environment.NewLine + new string('-', 60) + Environment.NewLine,
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    string p = Path.Combine(dir, "settings-crash.log");
+                    File.AppendAllText(p,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + body
+                        + Environment.NewLine,
                         new UTF8Encoding(false));
+                    return p;
                 }
-                catch { }
-            };
+                catch (Exception ex) { lastErr = ex.Message; }
+            }
+            try { Console.Error.WriteLine("崩溃日志写入失败（已尝试 " + cands.Count + " 处）: " + lastErr); }
+            catch { }
+            return null;
         }
 
         /// <summary>
@@ -305,7 +330,11 @@ namespace RunEverCs
             for (int i = 0; i < args.Length - 1; i++)
             {
                 if (args[i] == "--root")
-                    return args[i + 1].TrimEnd('\\', '/');
+                    // 2026-11-12：除尾斜杠，还要**去掉可能的引号**。
+                    //   历史坏值（自启项/外部脚本/旧版设置子进程）可能把 `D:\…\RunEver-20261107"`
+                    //   这种带字面引号的 root 传进来，TrimEnd 去不掉引号 ⇒ Path.Combine 抛
+                    //   「路径中具有非法字符」。这里做第二道兜底（第一道在 TrayApp.OpenSettings）。
+                    return args[i + 1].Trim().Trim('"').TrimEnd('\\', '/');
             }
 
             // 从 exe 目录向上找含 config\menus.conf 的目录
@@ -457,7 +486,99 @@ namespace RunEverCs
             InstallCrashHandler(wpfApp, root);
 
             var win = new Views.SettingsWindow(root);
+            StartParentWatch(wpfApp, win, root);
             wpfApp.Run(win);
+        }
+
+        /// <summary>
+        /// 托盘↔设置联动关闭之二（2026-11-12）：设置是独立进程，**父进程没了必须自己退**。
+        ///
+        /// 两条保险分工：
+        ///   · 托盘正常退出 → 托盘侧 `TrayApp.CloseSettingsProcesses()` 主动关（快、可优雅保存）；
+        ///   · 托盘被任务管理器强杀 / 崩溃 → 本监视器 2 秒内发现父 PID 消失，自行关窗退出。
+        /// 只认「显式传进来的 --parent-pid」，且校验进程名一致：PID 会被系统复用，
+        /// 不校验的话父退出后 PID 落到别的进程上，会变成永远不退。
+        /// </summary>
+        private static void StartParentWatch(Application app, Window win, string root)
+        {
+            int pid = FindIntArg("--parent-pid");
+            if (pid <= 0 || pid == System.Diagnostics.Process.GetCurrentProcess().Id) return;
+
+            DateTime myStart;
+            try { myStart = System.Diagnostics.Process.GetCurrentProcess().StartTime; }
+            catch { myStart = DateTime.MinValue; }
+
+            var timer = new System.Windows.Threading.DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(2)
+            };
+            bool closing = false;
+            timer.Tick += (s, e) =>
+            {
+                if (closing) return;
+                if (ParentAlive(pid, myStart)) return;
+
+                closing = true;
+                try { timer.Stop(); } catch { }
+                AppendStateLog(root, "父进程（托盘 pid=" + pid + "）已退出 ⇒ 设置窗口自动关闭");
+                try { win.Close(); } catch { }
+                try { app.Shutdown(); } catch { }
+                // 若此刻有模态框（如报错框）挡住关窗，2s 后硬退出：
+                // 设置进程没有需要收尾的盘面状态（保存都是即时写），硬退可接受。
+                var killer = new System.Threading.Thread(() =>
+                {
+                    try { System.Threading.Thread.Sleep(2000); } catch { }
+                    Environment.Exit(0);
+                });
+                killer.IsBackground = true;
+                killer.Start();
+            };
+            timer.Start();
+        }
+
+        /// <summary>
+        /// 父进程是否还活着。**PID 复用用「启动时间」判，不靠进程名**：
+        /// 名字比对在父子非同名的场景（包装器/AHK 助手拉起）会误判成"已死"，
+        /// 指针瞄准的其实是"这个 PID 还是不是当初那个进程"——那个进程一定比我启动得早，
+        /// 所以「启动时间晚于我自己」即可判定 PID 已被系统回收并复用。
+        /// </summary>
+        private static bool ParentAlive(int pid, DateTime myStart)
+        {
+            try
+            {
+                var p = System.Diagnostics.Process.GetProcessById(pid);
+                if (p == null || p.HasExited) return false;
+                try { if (p.StartTime > myStart) return false; } catch { }   // 取不到启动时间就不做强判
+                return true;
+            }
+            catch { return false; }     // 进程不存在 ⇒ GetProcessById 抛 ⇒ 视为已退出
+        }
+
+        /// <summary>取 `--xxx <int>` 形式的整型参数（取不到返回 0）。</summary>
+        private static int FindIntArg(string name)
+        {
+            string[] argv = Environment.GetCommandLineArgs();
+            for (int i = 0; i < argv.Length - 1; i++)
+            {
+                if (argv[i] != name) continue;
+                int v;
+                if (int.TryParse((argv[i + 1] ?? "").Trim(), out v)) return v;
+            }
+            return 0;
+        }
+
+        /// <summary>设置进程写一行到 state\runever-cs.log（和托盘共用同一份日志，便于对照排查）。</summary>
+        private static void AppendStateLog(string root, string msg)
+        {
+            try
+            {
+                string dir = Path.Combine(root ?? "", "state");
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.AppendAllText(Path.Combine(dir, "runever-cs.log"),
+                    DateTime.Now.ToString("HH:mm:ss") + " [settings] " + msg + Environment.NewLine,
+                    new UTF8Encoding(false));
+            }
+            catch { }
         }
 
         /// <summary>
