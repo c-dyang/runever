@@ -276,6 +276,10 @@ namespace RunEverCs
                 //     ⑩ 第二遍构建走 mtime 缓存（不重扫目录）
                 // ============================================================
                 RunSubmenuCases(sb);
+
+                // ★ 卡 E（2026-11-17b）：配置层两条修饰位在**菜单渲染这一侧**的锚点断言
+                //   （完整用例在 `--selftest-conf-flags`；这里只钉住"渲染层没退化"）
+                RunConfFlagCases(sb);
             }
             catch (Exception ex)
             {
@@ -499,23 +503,35 @@ namespace RunEverCs
                     + "U-B⑧ mtime 缓存: 第二遍构建命中缓存目录=" + MenuBuilder.LastDirCacheHits
                     + "（期望 >=3：docs/many/order 都走缓存）");
 
-                // ---- ⑨ 总开关关闭 ⇒ 一条子菜单都不建 ----
+                // ---- ⑨ 全局闸门已取消（2026-11-17）：显式 sub 仍展开 / 普通 open 永不展开 / 旧键取值不影响 ----
                 var off = new AutoConf { SubmenuEnabled = 0 };
                 var roff = MenuBuilder.Build(groups, off);
+                bool subStillOpens, plainStillLeaf;
+                int nOff;
                 try
                 {
-                    int idxDocs = FindTopIndex(roff.Menu, "普通目录");
-                    bool offLeaf = idxDocs >= 0 && SubTexts(roff.Menu, idxDocs).Count == 0
-                                && roff.IdMap.ContainsKey(roff.Menu.GetItemIdAt(idxDocs));
-                    bool s9 = offLeaf && MenuBuilder.LastSubmenus == 0;
-                    sb.AppendLine((s9 ? "[OK]   " : "[FAIL] ")
-                        + "U-B⑨ 总开关默认关: submenuEnabled=0 ⇒ 子菜单数="
-                        + MenuBuilder.LastSubmenus + " 普通目录退回普通 open=" + offLeaf);
+                    int idxSub = FindTopIndex(roff.Menu, "普通目录");
+                    int idxPlain = FindTopIndex(roff.Menu, "普通打开");
+                    subStillOpens = idxSub >= 0 && SubTexts(roff.Menu, idxSub).Count >= 1;
+                    plainStillLeaf = idxPlain >= 0 && SubTexts(roff.Menu, idxPlain).Count == 0
+                                  && roff.IdMap.ContainsKey(roff.Menu.GetItemIdAt(idxPlain));
+                    nOff = MenuBuilder.LastSubmenus;
                 }
                 finally
                 {
                     roff.Menu.Dispose();
                 }
+                var on = new AutoConf { SubmenuEnabled = 1 };
+                var ron = MenuBuilder.Build(groups, on);
+                int nOn;
+                try { nOn = MenuBuilder.LastSubmenus; }
+                finally { ron.Menu.Dispose(); }
+                bool gateIgnored = (nOff == nOn);
+                bool s9 = subStillOpens && plainStillLeaf && gateIgnored;
+                sb.AppendLine((s9 ? "[OK]   " : "[FAIL] ")
+                    + "U-B⑨ 全局闸门已取消: submenuEnabled=0 时 显式sub仍展开=" + subStillOpens
+                    + " 普通open仍为叶=" + plainStillLeaf
+                    + " 旧键取值不影响=" + gateIgnored + "（子菜单数 " + nOff + "/" + nOn + "）");
 
                 // ---- ⑨b 递归：recursive=1 + depth=2 时子目录再展开一层；depth=1 时仍是叶 ----
                 var rec2 = new AutoConf
@@ -621,8 +637,82 @@ namespace RunEverCs
             }
         }
 
-        private static int FindTopIndex(NativeMenu menu, string title)
+        // ============================================================
+        // ★ 卡 E（2026-11-17b）：`off`（灰显）/ `class:`（窗口类分组）渲染侧锚点
+        //   夹具写临时目录，不碰真实配置；详细矩阵见 --selftest-conf-flags。
+        // ============================================================
+        private static void RunConfFlagCases(StringBuilder sb)
         {
+            string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "runever-ce-" + Guid.NewGuid().ToString("N"));
+            string confDir = System.IO.Path.Combine(root, "config");
+            string confPath = System.IO.Path.Combine(confDir, "menus.conf");
+            var utf8 = new UTF8Encoding(false);
+            try
+            {
+                Directory.CreateDirectory(confDir);
+                var conf = new StringBuilder();
+                conf.AppendLine("! 禁用位  always");
+                conf.AppendLine("  可以点  _A  | run  \"a.exe\"");
+                conf.AppendLine("  点不动  _B  | run  \"b.exe\"  off");
+                conf.AppendLine("! 资源管理器  proc  class:CabinetWClass");
+                conf.AppendLine("  在资源管理器里  _R  | run  explorer.exe");
+                File.WriteAllText(confPath, conf.ToString(), utf8);
+
+                var p = new ConfParser(confPath);
+                p.Parse();
+
+                var always = new List<MenuGroup>();
+                var proc = new List<MenuGroup>();
+                foreach (var g in p.Groups)
+                {
+                    if (g.Type == GroupType.Always) always.Add(g);
+                    else if (g.Type == GroupType.Proc) proc.Add(g);
+                }
+
+                var built = MenuBuilder.Build(always, null);
+                try
+                {
+                    int idx = FindTopIndex(built.Menu, "点不动");
+                    uint st = idx >= 0
+                        ? Win32.GetMenuState(built.Menu.Handle, (uint)idx, Win32.MF_BYPOSITION) : 0;
+                    bool grayed = (st & Win32.MF_GRAYED) != 0;
+                    int id = idx >= 0 ? built.Menu.GetItemIdAt(idx) : -1;
+                    int idxOk = FindTopIndex(built.Menu, "可以点");
+                    int idOk = idxOk >= 0 ? built.Menu.GetItemIdAt(idxOk) : -1;
+
+                    bool ok = idx >= 0 && grayed && id > 0 && !built.IdMap.ContainsKey(id)
+                           && idOk > 0 && built.IdMap.ContainsKey(idOk)
+                           && built.ItemCount == 1 && built.GrayedCount == 1;
+                    sb.AppendLine((ok ? "[OK]   " : "[FAIL] ")
+                        + "卡E① `off` 条目：在菜单里 + 灰显=" + grayed
+                        + " + 不进 IdMap=" + (id > 0 && !built.IdMap.ContainsKey(id))
+                        + "（可点=" + built.ItemCount + " 灰显=" + built.GrayedCount + "）");
+                }
+                finally
+                {
+                    built.Menu.Dispose();
+                }
+
+                string kw = (proc.Count > 0 && proc[0].Keywords.Count > 0) ? proc[0].Keywords[0] : "";
+                bool kindOk = MatchEngine.KeywordKind(kw) == MatchEngine.ProcKeywordKind.WindowClass
+                           && string.Equals(MatchEngine.WindowClassOf(kw), "CabinetWClass",
+                                            StringComparison.OrdinalIgnoreCase);
+                int hit = MatchEngine.MatchProcGroups(proc, "", "CabinetWClass").Count;
+                int miss = MatchEngine.MatchProcGroups(proc, "", "Notepad").Count;
+                sb.AppendLine((kindOk && hit == 1 && miss == 0 ? "[OK]   " : "[FAIL] ")
+                    + "卡E② `class:` 关键词：" + kw + " → "
+                    + MatchEngine.KeywordKind(kw) + "；类名命中=" + hit + "（期望 1）"
+                    + " 类名不符=" + miss + "（期望 0）");
+            }
+            finally
+            {
+                try { if (Directory.Exists(root)) Directory.Delete(root, true); }
+                catch { }
+            }
+        }
+
+        private static int FindTopIndex(NativeMenu menu, string title)        {
             if (menu == null) return -1;
             int n = menu.Count();
             for (int i = 0; i < n; i++)

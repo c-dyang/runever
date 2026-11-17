@@ -19,8 +19,11 @@ namespace RunEverCs.Services
     ///   · action   —— 命令 / 脚本 + 参数；flag 控制窗口显示 / 隐藏。
     ///   · send     —— 文本发到当前输入框。
     ///   · keys     —— 模拟按键序列。
-    ///   · evsearch —— **本段只留分发位**：命中即返回"未实现"明确错误码（段 2 实现），
-    ///                 **绝不静默返回成功**。
+    ///   · evsearch —— 本地搜索（卡 F / 2026-11-17b）：用 Everything 语义查询目标串，
+    ///                 命中结果按"打开文件"执行。后端链：Everything64.dll（首选）→ es.exe（兜底）。
+    ///                 上限 = auto.conf 的 `submenuLimit`（默认 20）；
+    ///                 0 命中 ⇒ `evsearch-no-result`；两后端都不可用 ⇒ `evsearch-backend-unavailable`；
+    ///                 **任何情况都不静默成功、不抛异常**。
     ///
     /// ★ 占位符展开只走 `PlaceholderExpander`（唯一源）：本类的 `ReplaceVars` 只做委托，
     ///   **禁止两份替换逻辑**。
@@ -81,6 +84,56 @@ namespace RunEverCs.Services
             {
                 int n = (Conf != null) ? Conf.BatchMax : 10;
                 return n < 1 ? 1 : n;
+            }
+        }
+
+        // ============================================================
+        // evsearch 接线（卡 F / 2026-11-17b）
+        // ============================================================
+        /// <summary>
+        /// 配置根（可选）：非空 ⇒ evsearch 从 `&lt;root&gt;\config\auto.conf` 读
+        /// `submenulimit` / `espath` / `evdll`。`Conf` 已接线时以 `Conf` 为准。
+        /// </summary>
+        public string ConfigRoot;
+
+        /// <summary>
+        /// 注入点：Everything 直连查询（query, max）⇒ 命中全路径列表。
+        /// 返回 **null = 该后端不可用**（与"0 命中 = 空表"严格区分）；抛异常按不可用处理。
+        /// 未注入 ⇒ 走内置 `EverythingProbe` + `EvApi`。
+        /// </summary>
+        public Func<string, int, List<string>> EvQuery;
+
+        /// <summary>注入点：es.exe 查询，语义同 <see cref="EvQuery"/>。未注入 ⇒ 真跑 es.exe。</summary>
+        public Func<string, int, List<string>> EsQuery;
+
+        /// <summary>最近一次 evsearch 实际使用的后端（"EV" / "es" / ""）。</summary>
+        public string LastEvSearchBackend = "";
+
+        /// <summary>最近一次 evsearch 的命中（已去重、已按上限截断；自检与日志共用）。</summary>
+        public readonly List<string> LastEvSearchHits = new List<string>();
+
+        /// <summary>
+        /// evsearch 结果上限 —— **唯一来源** = auto.conf 的 `submenuLimit`（默认值取 `AutoConf` 本身，
+        /// 不在这里另写数字）。`Conf` 未接线时读 `ConfigRoot` 的 auto.conf。
+        /// </summary>
+        private int SearchLimit
+        {
+            get
+            {
+                int dflt = new AutoConf().SubmenuLimit;
+                if (Conf != null) return Conf.SubmenuLimit > 0 ? Conf.SubmenuLimit : dflt;
+                if (!string.IsNullOrEmpty(ConfigRoot))
+                {
+                    try
+                    {
+                        string v = BackendResolver.ReadAutoConfKey(
+                            BackendResolver.AutoConfPath(ConfigRoot), "submenulimit");
+                        int n;
+                        if (int.TryParse(v, out n) && n > 0) return n;
+                    }
+                    catch { }
+                }
+                return dflt;
             }
         }
 
@@ -244,7 +297,8 @@ namespace RunEverCs.Services
         /// <summary>
         /// 会按文件循环的动作类型：`run` / `open`（主场景）+ `action` / `send` / `keys`
         /// （用户口径：建议循环，但受 batchMax 总量上限）。
-        /// `url` / `evsearch` 不在内：前者是单串模板（无"文件 × 条目"语义），后者未实现。
+        /// `url` / `evsearch` 不在内：前者是单串模板（无"文件 × 条目"语义），
+        /// 后者自己就是"一次查询 N 条结果"（上限走 submenuLimit，不走 batchMax）。
         /// </summary>
         private static bool IsBatchType(string type)
         {
@@ -660,13 +714,300 @@ namespace RunEverCs.Services
             }
         }
 
-        // ---- evsearch: 本地搜索（**本段只留分发位**）----
+        // ============================================================
+        // ---- evsearch: 本地搜索（Everything 语义查询 → 按"打开文件"执行）----
+        //
+        // 分层纪律：查询**只在这里**（执行层）发生 —— 判定层（MatchEngine / MenuDecision）
+        // 不读盘、不查 Everything 的硬边界不受影响。
+        //
+        // 后端链（与 PathCacheBuilder 的解析链同源，但查询语义不同）：
+        //   ① Everything64.dll 直连（`EverythingProbe` 探针 + 缓存的 EvApi 句柄，EvLock 串行化）
+        //   ② es.exe（auto.conf 的 espath，候选位置兜底）
+        //   两条都不可用 ⇒ `evsearch-backend-unavailable`（与 0 命中严格区分）。
+        //
+        // ★ 与 `EverythingBackend.Search` 的区别：那里按**文件名全等**过滤（wfn 语义，解析程序名用）；
+        //   这里要的是**关键字查询**（用户写的搜索词），所以直接下发 SetSearchW 并保留 Everything
+        //   自己的匹配语义，不再做全等过滤。
+        // ============================================================
         private bool DoEvSearch(string target, Task t)
         {
-            // 段 2 实现：调起 Everything 本体（everythingExe= 配置键）+ 搜索词模板。
-            // 本段明确返回"未实现"错误码 —— **不得静默返回成功**（任务表 T8）。
-            return Fail(t, "evsearch-not-implemented",
-                "evsearch 动作尚未实现（v8 第 2 段交付）；目标=" + (target ?? ""));
+            LastEvSearchBackend = "";
+            LastEvSearchHits.Clear();
+
+            string query = (target ?? "").Trim();
+            if (query.Length == 0)
+            {
+                // 不走"未实现"占位：空查询是配置/占位符问题，单独给码（禁静默，也别谎报）。
+                return Fail(t, "evsearch-empty-query",
+                    "evsearch 查询为空：目标串（占位符展开后）没有可搜索的关键字");
+            }
+
+            int max = SearchLimit;
+            string evWhy = "", esWhy = "";
+            List<string> hits = null;
+            string backend = "";
+
+            hits = QueryEverything(query, max, out evWhy);
+            if (hits != null) backend = "EV";
+            else
+            {
+                hits = QueryEs(query, max, out esWhy);
+                if (hits != null) backend = "es";
+            }
+
+            if (hits == null)
+            {
+                return Fail(t, "evsearch-backend-unavailable",
+                    "evsearch 两条后端都不可用：EV[" + evWhy + "]；es[" + esWhy + "]；查询=" + query);
+            }
+
+            // 去重（保持后端返回顺序）+ 按上限截断（上限来自 auto.conf 的 submenuLimit）
+            var uniq = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string p in hits)
+            {
+                if (string.IsNullOrEmpty(p)) continue;
+                if (seen.Add(p)) uniq.Add(p);
+            }
+            if (uniq.Count > max) uniq.RemoveRange(max, uniq.Count - max);
+            LastEvSearchHits.AddRange(uniq);
+            LastEvSearchBackend = backend;
+
+            if (uniq.Count == 0)
+            {
+                return Fail(t, "evsearch-no-result",
+                    "evsearch 无结果：后端=" + backend + " 查询=[" + query + "] 上限=" + max);
+            }
+
+            t.Log("evsearch backend=" + backend + " query=[" + query + "] 命中=" + uniq.Count
+                + " 上限(submenuLimit)=" + max);
+
+            if (DryRun)
+            {
+                LastOpenTarget = uniq[0];
+                t.Log("DryRun evsearch（不真打开）: " + string.Join(" | ", uniq.ToArray()));
+                return true;
+            }
+
+            // 按"打开文件"执行：逐个 ShellExecute；索引陈旧（文件已不在）只跳过并记日志，
+            // 绝不因为一条幽灵候选把整次动作判失败（与 run 的"移位"兜底同精神）。
+            int opened = 0;
+            foreach (string path in uniq)
+            {
+                bool exists;
+                try { exists = File.Exists(path) || Directory.Exists(path); }
+                catch { exists = false; }
+
+                if (!exists)
+                {
+                    t.Log("evsearch 跳过（索引陈旧/已不在盘上）: " + path);
+                    continue;
+                }
+                try
+                {
+                    Process.Start(new ProcessStartInfo { FileName = path, UseShellExecute = true });
+                    opened++;
+                }
+                catch (Exception ex)
+                {
+                    t.Log("evsearch 打开失败: " + path + " :: " + ex.Message);
+                }
+            }
+
+            if (opened == 0)
+            {
+                return Fail(t, "evsearch-open-failed",
+                    "evsearch 命中 " + uniq.Count + " 条，但没有一条能打开（全部已不在盘上或启动失败）");
+            }
+
+            t.Log("evsearch 已打开 " + opened + "/" + uniq.Count + " 条");
+            return true;
+        }
+
+        /// <summary>auto.conf 的 `evdll`（未接 ConfigRoot ⇒ 自动探测）。</summary>
+        private string EvDllForSearch()
+        {
+            if (string.IsNullOrEmpty(ConfigRoot)) return "";
+            try { return BackendResolver.ReadEvDll(ConfigRoot); }
+            catch { return ""; }
+        }
+
+        /// <summary>
+        /// Everything64.dll 直连查询。返回 null = **后端不可用**（加载/探针/IPC 失败）；
+        /// 空表 = 可用但 0 命中。绝不抛。
+        /// </summary>
+        private List<string> QueryEverything(string query, int max, out string why)
+        {
+            why = "";
+
+            if (EvQuery != null)
+            {
+                try
+                {
+                    List<string> r = EvQuery(query, max);
+                    if (r == null) { why = "注入后端报告不可用"; return null; }
+                    return r;
+                }
+                catch (Exception ex) { why = "注入后端异常: " + ex.Message; return null; }
+            }
+
+            BackendStatus st;
+            try { st = EverythingProbe.Get(EvDllForSearch(), false); }
+            catch (Exception ex) { why = "EV 探针异常: " + ex.Message; return null; }
+
+            if (st == null || st.Kind != BackendKind.Everything)
+            {
+                why = "EV 不可用" + ((st != null && !string.IsNullOrEmpty(st.Reason)) ? "（" + st.Reason + "）" : "");
+                return null;
+            }
+
+            EvApi api = EverythingProbe.Handle;
+            if (api == null) { why = "EV 句柄为空（探针成功但未保留实例）"; return null; }
+
+            var list = new List<string>();
+            lock (EvLock.Sync)
+            {
+                try
+                {
+                    api.SetSearchW(query);
+                    api.SetMatchPath(false);
+                    api.SetRegex(false);
+                    api.SetMatchWholeWord(false);
+                    api.SetMatchCase(false);
+                    api.SetMax((uint)max);
+                    api.SetOffset(0);
+
+                    bool ok = api.QueryW(true);
+                    int err = (int)api.GetLastError();
+                    uint n = api.GetNumResults();
+
+                    if (!ok || err != 0)
+                    {
+                        try { api.Cleanup(); } catch { }
+                        why = "EV 查询失败 lastError=" + err + (err == 2 ? "（Everything 未运行/IPC 不通）" : "");
+                        return null;
+                    }
+
+                    for (uint i = 0; i < n && i < (uint)max; i++)
+                    {
+                        string full = api.FullPathAt(i);
+                        if (!string.IsNullOrEmpty(full)) list.Add(full);
+                    }
+                    try { api.Cleanup(); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    try { api.Cleanup(); } catch { }
+                    why = "EV 查询异常: " + ex.Message;
+                    return null;
+                }
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// es.exe 兜底查询（`-n &lt;max&gt; -export-txt &lt;tmp&gt; &lt;query&gt;`）。
+        /// 返回 null = 不可用 / 调用失败；空表 = 0 命中。绝不抛。
+        /// </summary>
+        private List<string> QueryEs(string query, int max, out string why)
+        {
+            why = "";
+
+            if (EsQuery != null)
+            {
+                try
+                {
+                    List<string> r = EsQuery(query, max);
+                    if (r == null) { why = "注入后端报告不可用"; return null; }
+                    return r;
+                }
+                catch (Exception ex) { why = "注入后端异常: " + ex.Message; return null; }
+            }
+
+            string esPath = "";
+            try
+            {
+                if (!string.IsNullOrEmpty(ConfigRoot))
+                    esPath = PathCacheBuilder.ResolveEsPath(
+                        PathCacheBuilder.ReadEsPathFromConfig(BackendResolver.AutoConfPath(ConfigRoot)));
+            }
+            catch { }
+            if (string.IsNullOrEmpty(esPath))
+            {
+                try { esPath = PathCacheBuilder.ResolveEsPath(null); } catch { }
+            }
+            if (string.IsNullOrEmpty(esPath))
+            {
+                why = "es.exe 不可用（auto.conf 的 espath 与候选位置都没命中）";
+                return null;
+            }
+
+            string outFile = null;
+            try
+            {
+                outFile = Path.Combine(Path.GetTempPath(),
+                    "rv_evsearch_" + Guid.NewGuid().ToString("N").Substring(0, 12) + ".txt");
+
+                var psi = new ProcessStartInfo(esPath);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                // -export-txt = es 自己写 UTF-8 文件（cmd 重定向会丢编码）；查询串整体按一个参数传
+                psi.Arguments = "-n " + max + " -export-txt "
+                    + PathCacheBuilder.QuoteArg(outFile) + " " + PathCacheBuilder.QuoteArg(query);
+
+                using (var proc = new Process())
+                {
+                    proc.StartInfo = psi;
+                    var sbErr = new StringBuilder();
+                    proc.OutputDataReceived += delegate { };
+                    proc.ErrorDataReceived += (s, e) => { if (e.Data != null) sbErr.AppendLine(e.Data); };
+                    proc.Start();
+                    proc.BeginOutputReadLine();
+                    proc.BeginErrorReadLine();
+
+                    if (!proc.WaitForExit(PathCacheBuilder.EsTimeoutMs))
+                    {
+                        try { proc.Kill(); } catch { }
+                        why = "es 查询超时（>" + PathCacheBuilder.EsTimeoutMs + "ms）";
+                        return null;
+                    }
+                    proc.WaitForExit();
+
+                    if (proc.ExitCode != 0)
+                    {
+                        why = "es 退出码 " + proc.ExitCode
+                            + (sbErr.Length > 0 ? "：" + sbErr.ToString().Trim() : "");
+                        return null;
+                    }
+                }
+
+                if (!File.Exists(outFile))
+                {
+                    why = "es 未产出导出文件（0 命中时也可能不建文件，按 0 命中处理）";
+                    return new List<string>();
+                }
+
+                var list = new List<string>();
+                foreach (string raw in File.ReadAllLines(outFile, Encoding.UTF8))
+                {
+                    string line = raw.Trim().Trim(' ', '\t', '\r', '"');
+                    if (line.Length == 0) continue;
+                    list.Add(line);
+                    if (list.Count >= max) break;
+                }
+                return list;
+            }
+            catch (Exception ex)
+            {
+                why = "es 查询异常: " + ex.Message;
+                return null;
+            }
+            finally
+            {
+                try { if (outFile != null && File.Exists(outFile)) File.Delete(outFile); } catch { }
+            }
         }
 
         // ============================================================

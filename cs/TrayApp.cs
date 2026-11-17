@@ -919,6 +919,16 @@ namespace RunEverCs
                 if (_mouse != null && _mouse.OnTimerElapsed())
                     InvokeMenu();
             }
+            else if (msg == MouseTrigger.WM_POPUP_RBUTTON)
+            {
+                // ★ 2026-11-17：菜单弹窗期间的右键（钩子投递）→ 主线程自己算命中项并弹上下文菜单
+                if (_mouse != null)
+                {
+                    int rx, ry;
+                    _mouse.GetPopupRightClick(out rx, out ry);
+                    Native.NativeMenu.HandlePopupRightClick(rx, ry);
+                }
+            }
             else if (msg == MouseTrigger.WM_REPLAY)
             {
                 // ★ 2026-11-11：钩子回调只投递（回调里 SendInput 会重入钩子链卡死消息泵）。

@@ -436,9 +436,9 @@ namespace RunEverCs.Native
         /// </summary>
         public int Show(IntPtr ownerHwnd, int x, int y, bool rightAlign = false, bool bottomAlign = false)
         {
-            uint flags = Win32.TPM_RETURNCMD | Win32.TPM_NONOTIFY
-                | (rightAlign ? Win32.TPM_RIGHTALIGN : Win32.TPM_LEFTALIGN)
-                | (bottomAlign ? Win32.TPM_BOTTOMALIGN : Win32.TPM_TOPALIGN);
+            // ★ 卡 D（2026-11-17b）：flags 收进纯函数 BuildPopupFlags —— 自检可离线断言
+            //   「TPM_RECURSE 已置入、TPM_RETURNCMD | TPM_NONOTIFY 与对齐位一位没改」。
+            uint flags = BuildPopupFlags(rightAlign, bottomAlign);
 
             IntPtr prevFg = IntPtr.Zero;
             string diag;
@@ -464,8 +464,18 @@ namespace RunEverCs.Native
 
             // ★ 空格 = 回车：菜单循环里把 VK_SPACE 改写成 VK_RETURN（线程级 WH_MSGFILTER，
             //   只在本次弹出期间挂着，退出即摘，不影响任何其他程序）
+            //
+            // ★ 卡 D：WM_MENURBUTTONUP 是 **sent** 消息（不进队列）⇒ WH_MSGFILTER 抓不到，
+            //   只能挂在 owner 的窗口过程上。这里在弹出期间**临时子类化** owner（弹出后原样还回），
+            //   于是 owner 是 OwnerWindow / HiddenOwnerWindow 都同样生效，且不改它们任何一行。
             int ret;
             IntPtr hook = IntPtr.Zero;
+            // ★ 没挂上下文菜单（MenuButtonUp == null）就完全不子类化 ⇒ 现役路径一个系统调用都不多
+            bool subclassed = MenuButtonUp != null && InstallSubclass(ownerHwnd);
+            // ★ 菜单显示期间让鼠标钩子放行右键（否则右键事件被吞，WM_MENURBUTTONUP 不来）
+            System.Threading.Interlocked.Increment(ref PopupDepth);
+            ActiveOwner = ownerHwnd;
+            ActiveHandler = MenuButtonUp;
             try
             {
                 // ⚠ hMod 必须给模块句柄（托管回调 + IntPtr.Zero 在部分环境直接失败，
@@ -481,7 +491,11 @@ namespace RunEverCs.Native
             }
             finally
             {
+                System.Threading.Interlocked.Decrement(ref PopupDepth);
+                ActiveHandler = null;
+                ActiveOwner = IntPtr.Zero;
                 if (hook != IntPtr.Zero) { try { Win32.UnhookWindowsHookEx(hook); } catch { } }
+                if (subclassed) RemoveSubclass();
             }
 
             // ★ 还焦：菜单关闭后把前台还给弹出前的窗口（选中/取消/点外面三条路径都会走到这里）
@@ -492,6 +506,11 @@ namespace RunEverCs.Native
             FocusDiag = diag + " | 还焦="
                 + (restored ? "成功" : (prevFg == IntPtr.Zero ? "无前窗口" : "失败/跳过"))
                 + " 当前前台=0x" + Win32.GetForegroundWindow().ToInt64().ToString("X");
+
+            // ★ 卡 D：菜单**已经关掉**（TrackPopupMenuEx 已返回、窗口过程已还原）才跑延后动作 ——
+            //   输入框 / 写盘都绝不在菜单消息泵里同步做（那会卡死菜单）。
+            var closed = PopupClosed;
+            if (closed != null) { try { closed(); } catch { } }
 
             return ret;
         }
@@ -589,6 +608,326 @@ namespace RunEverCs.Native
             Win32.POINT pt;
             Win32.GetCursorPos(out pt);
             return Show(ownerHwnd, pt.X, pt.Y);
+        }
+
+        // ============================================================
+        // ★ 卡 D（2026-11-17b）：菜单项右键上下文菜单 —— 原生侧支撑
+        //   官方机制（已核实，别自己发明）：
+        //     · WM_MENURBUTTONUP (0x0122)：用户在**某个菜单项上松开右键**时发给菜单 **owner**；
+        //       wParam = 该项的零基索引，lParam = hMenu。它是 **sent** 消息（不进消息队列）
+        //       ⇒ 既有 WH_MSGFILTER（空格改回车）抓不到，必须挂在 owner 的窗口过程上。
+        //     · 文档 Remarks：显示该项的上下文菜单要调 TrackPopupMenuEx **并带 TPM_RECURSE**。
+        //     · TPM_RECURSE (0x0001)：允许"另一个菜单已显示时"再弹一个菜单 ——
+        //       主菜单弹出时必须带上它，否则二级菜单弹不出来/异常。
+        //
+        //   本层只做「原生事实」（标志位 / 消息 / 索引→命令 ID / 裸弹菜单 / 关菜单），
+        //   **策略**（该弹什么、改哪个字段、怎么写盘）在 Services.MenuItemContextMenu ——
+        //   Native 不反向依赖 Services（分层方向见 --selftest-arch）。
+        // ============================================================
+
+        /// <summary>用户在菜单项上松开右键（发给菜单 owner 窗口；sent 消息，不进队列）。</summary>
+        public const uint WM_MENURBUTTONUP = 0x0122;
+
+        /// <summary>允许"另一个菜单已显示时"再弹一个菜单（菜单里的上下文菜单必须带它）。</summary>
+        public const uint TPM_RECURSE = 0x0001;
+
+        private const uint MIIM_FTYPE = 0x00000100;
+        private const uint MFT_SEPARATOR = 0x0800;
+
+        /// <summary>
+        /// 一级（主）菜单的弹出 flags —— **纯函数**（自检可离线断言，不用弹菜单）。
+        /// ★ 既有语义逐位不变（TPM_RETURNCMD | TPM_NONOTIFY + 对齐位），
+        ///   只多置了 <see cref="TPM_RECURSE"/>（右键二级菜单的前提）。
+        /// </summary>
+        public static uint BuildPopupFlags(bool rightAlign, bool bottomAlign)
+        {
+            return Win32.TPM_RETURNCMD | Win32.TPM_NONOTIFY | TPM_RECURSE
+                | (rightAlign ? Win32.TPM_RIGHTALIGN : Win32.TPM_LEFTALIGN)
+                | (bottomAlign ? Win32.TPM_BOTTOMALIGN : Win32.TPM_TOPALIGN);
+        }
+
+        /// <summary>二级（右键）菜单的 flags：外层菜单还开着 ⇒ 同样必须 TPM_RECURSE。</summary>
+        public const uint ContextPopupFlags = TPM_RECURSE | Win32.TPM_RETURNCMD | Win32.TPM_NONOTIFY
+            | Win32.TPM_LEFTALIGN | Win32.TPM_TOPALIGN;
+
+        /// <summary>
+        /// owner 窗口收到 <see cref="WM_MENURBUTTONUP"/> 时的回调：(owner, hMenu, index)。
+        /// null ⇒ 消息原样放行（零回归：没有挂上下文菜单时行为与改造前完全一致）。
+        /// ★ 处理器内部必须自己吞异常 —— 见 <see cref="SubclassProcImpl"/>。
+        /// </summary>
+        public Action<IntPtr, IntPtr, int> MenuButtonUp;
+
+        /// <summary>
+        /// 我们自己的弹出菜单嵌套深度（0 = 没有菜单在显示）。
+        ///
+        /// ★ 2026-11-17 真机事故换来的：`MouseTrigger` 的低级鼠标钩子会**吞掉所有
+        ///   RBUTTONDOWN**（长按触发的前提），于是菜单显示期间用户点右键时，菜单收不到
+        ///   配对事件 ⇒ Windows 不发 `WM_MENURBUTTONUP` ⇒ 右键上下文菜单永远不弹。
+        ///   钩子据此标志在菜单显示期间把右键原样放行。
+        /// </summary>
+        public static int PopupDepth;
+
+        /// <summary>当前是否有我们自己的弹出菜单正在显示。</summary>
+        /// <summary>当前这次弹出的右键处理器（Show 期间有效；钩子路径据此回调）。</summary>
+        public static Action<IntPtr, IntPtr, int> ActiveHandler;
+
+        /// <summary>当前这次弹出的 owner 窗口（右键二级菜单的 TrackPopupMenuEx owner）。</summary>
+        public static IntPtr ActiveOwner;
+
+        [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Win32.POINT pt);
+        [DllImport("user32.dll")] private static extern bool ScreenToClient(IntPtr hWnd, ref Win32.POINT pt);
+        [DllImport("user32.dll")] private static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll")] private static extern int MenuItemFromPoint(IntPtr hWnd, IntPtr hMenu, Win32.POINT pt);
+
+        /// <summary>菜单弹窗窗口类名（系统内置）。</summary>
+        private const string PopupMenuClass = "#32768";
+
+        /// <summary>
+        /// ★ 2026-11-17 兜底路径：**不依赖 WM_MENURBUTTONUP**。
+        /// 实测那条消息在本机（Win32 TrackPopupMenuEx + 纯 Win32 owner + 低级鼠标钩子）根本不来；
+        /// 改由鼠标钩子把"菜单弹窗期间的右键抬起"转成坐标投递到主线程，这里自己算命中项。
+        /// 返回 true = 已交给右键处理器。
+        /// </summary>
+        public static bool HandlePopupRightClick(int screenX, int screenY)
+        {
+            try
+            {
+                var pt = new Win32.POINT { X = screenX, Y = screenY };
+                IntPtr wnd = WindowFromPoint(pt);
+                if (wnd == IntPtr.Zero) return false;
+                var sb = new StringBuilder(32);
+                if (Win32.GetClassNameW(wnd, sb, 32) <= 0) return false;
+                if (sb.ToString() != PopupMenuClass) return false;
+
+                IntPtr hMenu = SendMessageW(wnd, 0x01E1 /*MN_GETHMENU*/, IntPtr.Zero, IntPtr.Zero);
+                if (hMenu == IntPtr.Zero) return false;
+
+                int idx = MenuItemFromPoint(IntPtr.Zero, hMenu, pt);
+                if (idx < 0)
+                {
+                    var cli = pt;
+                    if (ScreenToClient(wnd, ref cli)) idx = MenuItemFromPoint(IntPtr.Zero, hMenu, cli);
+                }
+                if (idx < 0) return false;
+
+                var h = ActiveHandler;
+                if (h == null) return false;
+                h(ActiveOwner, hMenu, idx);
+                return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool IsPopupActive
+        {
+            get { return System.Threading.Volatile.Read(ref PopupDepth) > 0; }
+        }
+
+        /// <summary>
+        /// 主菜单**已关闭之后**（TrackPopupMenuEx 已返回、窗口过程已还原）的回调。
+        /// 延后动作（输入框 / 写盘 / 重建菜单）只能挂这里 —— 绝不进菜单消息泵。
+        /// </summary>
+        public Action PopupClosed;
+
+        /// <summary>右键链路的日志出口（Services 注入；为空则不写）。</summary>
+        public Action<string> ContextLog;
+
+        private IntPtr _subclassHwnd = IntPtr.Zero;
+        private int _diagBtnUp;      // 诊断：WM_MENURBUTTONUP 到达次数
+
+        private IntPtr _oldWndProc = IntPtr.Zero;
+        private WndProcDelegate _subclassProc;      // ★ 必须持引用：被 GC 回收 = 进程直接崩
+
+        private delegate IntPtr WndProcDelegate(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+        private const int GWLP_WNDPROC = -4;
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+        private static extern IntPtr SetWindowLongPtrW(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+        private static extern int SetWindowLongW(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr CallWindowProcW(IntPtr lpPrevWndFunc, IntPtr hWnd,
+            uint msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool EndMenu();
+
+        /// <summary>SetWindowLongPtr 的 32/64 位统一入口（x86 上 user32 只导出 SetWindowLongW）。</summary>
+        private static IntPtr SetWndProc(IntPtr hWnd, IntPtr newProc)
+        {
+            if (IntPtr.Size == 8) return SetWindowLongPtrW(hWnd, GWLP_WNDPROC, newProc);
+            return new IntPtr(SetWindowLongW(hWnd, GWLP_WNDPROC, newProc.ToInt32()));
+        }
+
+        /// <summary>
+        /// 弹出期间临时子类化 owner。失败 ⇒ 返回 false（右键菜单弹不出来，主菜单照常）。
+        /// </summary>
+        private bool InstallSubclass(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero || !Win32.IsWindow(hwnd)) return false;
+            try
+            {
+                _subclassProc = SubclassProcImpl;
+                IntPtr fn = Marshal.GetFunctionPointerForDelegate(_subclassProc);
+                IntPtr old = SetWndProc(hwnd, fn);
+                if (old == IntPtr.Zero)
+                {
+                    _subclassProc = null;
+                    Log("⚠ 右键：owner 窗口过程替换失败 err=" + Marshal.GetLastWin32Error()
+                        + "（主菜单不受影响，右键菜单不可用）");
+                    return false;
+                }
+                _oldWndProc = old;
+                _subclassHwnd = hwnd;
+                Log("右键：owner 子类化成功 hwnd=0x" + hwnd.ToInt64().ToString("X")
+                    + "（PopupDepth=" + System.Threading.Volatile.Read(ref PopupDepth) + "）");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _subclassProc = null;
+                Log("⚠ 右键：子类化 owner 异常（主菜单不受影响）: " + ex.Message);
+                return false;
+            }
+        }
+
+        private void RemoveSubclass()
+        {
+            try
+            {
+                if (_subclassHwnd != IntPtr.Zero && _oldWndProc != IntPtr.Zero)
+                    SetWndProc(_subclassHwnd, _oldWndProc);
+            }
+            catch { }
+            _subclassHwnd = IntPtr.Zero;
+            _oldWndProc = IntPtr.Zero;
+            _subclassProc = null;
+        }
+
+        /// <summary>
+        /// 子类化的窗口过程：只截 <see cref="WM_MENURBUTTONUP"/>，其余一律照原过程走。
+        /// ★ 任何异常都在这里吞掉 —— 右键菜单失败绝不许把主菜单打掉。
+        /// </summary>
+        private IntPtr SubclassProcImpl(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam)
+        {
+            // ★ 2026-11-17 实测结论：本机 WM_MENURBUTTONUP **从不发出**（诊断 0 命中；
+            //   该项为 MF_POPUP 时系统本就不发，见 SO 76769328），所以实际生效的是
+            //   鼠标钩子那条兜底路径（NativeMenu.HandlePopupRightClick）。
+            //   这里只保留"万一它来了"的计数，不再逐条刷日志。
+            if (msg == WM_MENURBUTTONUP)
+            {
+                if (++_diagBtnUp <= 3)
+                    Log("右键：收到 WM_MENURBUTTONUP index=" + wParam.ToInt64() + "（系统这条消息一般不发）");
+            }
+
+            if (msg == WM_MENURBUTTONUP)
+            {
+                try
+                {
+                    var handler = MenuButtonUp;
+                    if (handler != null)
+                    {
+                        handler(hWnd, lParam, wParam.ToInt32());
+                        return IntPtr.Zero;      // 已处理：默认过程对这条消息本来也无动作
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("⚠ 右键菜单处理失败（主菜单不受影响）: " + ex.Message);
+                }
+            }
+
+            if (_oldWndProc == IntPtr.Zero) return IntPtr.Zero;
+            return CallWindowProcW(_oldWndProc, hWnd, msg, wParam, lParam);
+        }
+
+        private void Log(string line)
+        {
+            var log = ContextLog;
+            if (log != null) { try { log(line); } catch { } }
+        }
+
+        /// <summary>
+        /// 索引 → 命令 ID（**官方口径**：GetMenuItemInfoW + MF_BYPOSITION + MIIM_ID）。
+        /// 返回 false 时 <paramref name="why"/> 说明为什么不可编辑（越界 / 分隔线 / 子菜单项）。
+        /// ★ 纯查表，不弹任何菜单；自检直接喂 hMenu + index 即可。
+        /// </summary>
+        public static bool TryGetMenuItemInfo(IntPtr hMenu, int index,
+            out int cmdId, out bool isSeparator, out bool isSubmenu, out string why)
+        {
+            cmdId = 0;
+            isSeparator = false;
+            isSubmenu = false;
+            why = "";
+
+            if (hMenu == IntPtr.Zero) { why = "菜单句柄为空"; return false; }
+
+            int count = Win32.GetMenuItemCount(hMenu);
+            if (count < 0) { why = "菜单句柄无效（GetMenuItemCount=" + count + "）"; return false; }
+            if (index < 0 || index >= count)
+            {
+                why = "索引越界（index=" + index + "，菜单项数=" + count + "）";
+                return false;
+            }
+
+            var mii = new Win32.MENUITEMINFO();
+            mii.cbSize = (uint)Marshal.SizeOf(typeof(Win32.MENUITEMINFO));
+            mii.fMask = Win32.MIIM_ID | Win32.MIIM_SUBMENU | MIIM_FTYPE;
+            if (!Win32.GetMenuItemInfoW(hMenu, (uint)index, true, ref mii))
+            {
+                why = "GetMenuItemInfoW 失败 err=" + Marshal.GetLastWin32Error();
+                return false;
+            }
+
+            if ((mii.fType & MFT_SEPARATOR) != 0 || mii.wID == 0)
+            {
+                isSeparator = true;
+                why = "分隔线（不可编辑）";
+                return false;
+            }
+            if (mii.hSubMenu != IntPtr.Zero || mii.wID == 0xFFFFFFFF)
+            {
+                isSubmenu = true;
+                why = "子菜单项（容器没有动作，不可编辑）";
+                return false;
+            }
+
+            cmdId = unchecked((int)mii.wID);
+            if (cmdId <= 0) { why = "命令 ID 无效（" + cmdId + "）"; return false; }
+            why = "";
+            return true;
+        }
+
+        /// <summary>
+        /// 裸 TrackPopupMenuEx（二级菜单用）：不装空格钩子、不抢/还焦点、不子类化 ——
+        /// 二级菜单本来就在主菜单的模态循环里，抢焦点会打断外层。
+        /// </summary>
+        public static int TrackPopupRaw(IntPtr hMenu, uint flags, int x, int y, IntPtr ownerHwnd)
+        {
+            // ★ 二级菜单同样计入"菜单显示中"（嵌套深度），右键才不会在二级菜单里又被吞
+            System.Threading.Interlocked.Increment(ref PopupDepth);
+            try
+            {
+                return Win32.TrackPopupMenuEx(hMenu, flags, x, y, ownerHwnd, IntPtr.Zero);
+            }
+            finally
+            {
+                System.Threading.Interlocked.Decrement(ref PopupDepth);
+            }
+        }
+
+        /// <summary>
+        /// 结束当前线程的**活动菜单**（右键选定动作后关主菜单）。
+        /// ★ 关掉而不是"就地改"：当前 HMENU 句柄是固定的，改完配置只能重建一张新菜单，
+        ///   复用旧句柄会点到已失效的 IdMap（历史"点任何项都开同一个程序"同源）。
+        /// </summary>
+        public static bool EndActiveMenu()
+        {
+            try { return EndMenu(); }
+            catch { return false; }
         }
 
         // ============================================================

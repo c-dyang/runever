@@ -68,7 +68,11 @@ namespace RunEverCs.Services
         /// </summary>
         public int OneShot = 0;
 
-        /// <summary>`open sub &lt;目录&gt;` 是否在弹菜单时当场展开（用户 2026-11-09）。0 = 关（默认）。</summary>
+        /// <summary>
+        /// 【已废弃 · 2026-11-17】原「全局闸门」：`open sub` 是否当场展开。
+        /// 定案取消全局闸门 —— 只有**显式 sub** 才展开。本字段仅保留读取以兼容旧 auto.conf，
+        /// **不再参与任何判定**；设置页已移除对应开关。
+        /// </summary>
         public int SubmenuEnabled = 0;
 
         /// <summary>子菜单最多几项（默认 20），超出截断 —— 防大目录把菜单撑爆。</summary>

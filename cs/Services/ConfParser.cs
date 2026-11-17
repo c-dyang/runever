@@ -19,6 +19,19 @@ namespace RunEverCs.Services
     ///   action 后面的白名单词 hide/show 被吃成 Flag，其余归 Target。
     ///   ★ 2026-11-09（U-B）：紧随类型（或 hide/show 之后）的 `sub` 是第三个修饰位取值，
     ///     仅对 open 生效 ⇒ 渲染期展开成子菜单（见 MenuBuilder）。行语法不变。
+    ///   ★ 2026-11-17b（卡 E）：同一位序再接受一个 `off`（条目临时禁用，不删配置）⇒
+    ///     `MenuItem.Off = true`，渲染成灰显条目（见 MenuBuilder）。
+    ///     两种写法都认：**修饰位**（`run off "x.exe"`，规范形式）与**行尾**（`run "x.exe" off`，
+    ///     HANDOFF 示例形式；行尾形式只对 run/open/url/action 生效 —— send/keys 的目标里
+    ///     `turn off` 这种是**内容**，绝不能被吃成修饰位）。老配置（无 off）解析结果逐字不变。
+    ///   ★ `class:`（卡 E）：`proc` 组的关键词可写成 `class:类名` ⇒ 按前台窗口类名匹配
+    ///     （见 MatchEngine.MatchProcGroups）。这里**不改**关键词的存储口径（仍小写原样存），
+    ///     前缀语义只在匹配层解释 —— 既有的 ext/proc 关键词解析一位不动。
+    ///
+    /// ★ 卡 F（2026-11-17b）：本类**不**自动叠加 `menulocal.conf`（覆盖层）。
+    ///   合并点是 `MenuLocalOverlay.Apply(parser, menus.conf, log)`，由宿主在"解析之后、
+    ///   构建之前"调用。原因见 `MenuLocalOverlay` 文件头：写盘侧（编辑器 / 窄写回）也走
+    ///   本类，若 Parse 就掺进覆盖层，保存会把本机增量写进基文件。
     /// </summary>
     public class ConfParser
     {
@@ -55,10 +68,24 @@ namespace RunEverCs.Services
             _path = path;
         }
 
-        /// <summary>解析；失败抛异常（调用方决定是否回落）。</summary>
+        /// <summary>
+        /// 本实例是否已叠加过 menulocal.conf 覆盖层（幂等护栏）。
+        /// ★ 只由 <see cref="MenuLocalOverlay.Apply"/> 置位，且每次 <see cref="Parse"/> 复位 ——
+        ///   同一 parser 被 Apply 两次时不会重复追加条目。
+        /// </summary>
+        internal bool OverlayApplied;
+
+        /// <summary>整体替换分组表（覆盖层合并成功后由 <see cref="MenuLocalOverlay"/> 调用）。</summary>
+        internal void ReplaceGroups(List<MenuGroup> groups)
+        {
+            Groups = groups ?? new List<MenuGroup>();
+        }
+
+        /// <summary>解析；失败抛异常（调用方决定是否回落）。**不**叠加 menulocal.conf。</summary>
         public void Parse()
         {
             Groups = new List<MenuGroup>();
+            OverlayApplied = false;
             AutoFixCount = 0;
             AutoFixNotes = new List<string>();
             NormalizeReport = "结构自动修正=0";
@@ -68,6 +95,34 @@ namespace RunEverCs.Services
             string text = File.ReadAllText(_path, Encoding.UTF8);
             text = text.Replace("\r\n", "\n").Replace("\r", "\n");
 
+            ParseText(text);
+
+            // ★ L2/F3：解析完成后的**唯一一次**结构规范化（在判定层之前）。
+            //   语义：只升格、不改行序、不改 Level、不删子项；无子项的普通条目不碰。
+            NormalizeStructure();
+        }
+
+        /// <summary>
+        /// 只读解析入口（覆盖层 / 需要"原样结构"的调用方用）：
+        ///   · **不做** <see cref="NormalizeStructure"/> 升格 —— 调用方自己决定何时校验；
+        ///   · **不**叠加 menulocal.conf（防递归：覆盖层解析时不能再套覆盖层）。
+        /// 失败抛异常（覆盖层侧会吞掉并整份丢弃）。
+        /// </summary>
+        public static List<MenuGroup> ParseFileReadOnly(string path)
+        {
+            if (!File.Exists(path))
+                throw new FileNotFoundException("配置文件不存在: " + path);
+
+            var p = new ConfParser(path);
+            string text = File.ReadAllText(path, Encoding.UTF8);
+            text = text.Replace("\r\n", "\n").Replace("\r", "\n");
+            p.ParseText(text);
+            return p.Groups;
+        }
+
+        /// <summary>逐行解析（分组行 + 条目行）；结构规范化不在这里做。</summary>
+        private void ParseText(string text)
+        {
             string[] lines = text.Split('\n');
             int cur = -1;   // 当前分组索引（-1 = 还没有分组）
 
@@ -93,10 +148,6 @@ namespace RunEverCs.Services
                 if (cur < 0) continue;
                 ParseItemLine(rawLine, cur, lineNo);
             }
-
-            // ★ L2/F3：解析完成后的**唯一一次**结构规范化（在判定层之前）。
-            //   语义：只升格、不改行序、不改 Level、不删子项；无子项的普通条目不碰。
-            NormalizeStructure();
         }
 
         // ============================================================
@@ -159,6 +210,7 @@ namespace RunEverCs.Services
                     p.Target = "";
                     p.Flag = ActionFlag.None;
                     p.Sub = false;      // ★ U-B：升格成 group 就没有 open 动作了，展开位随之失效
+                    p.Off = false;      // ★ 卡 E：group 标题没有动作 ⇒ 禁用位一起失效（否则写回会丢 off）
 
                     AutoFixCount++;
 
@@ -333,6 +385,7 @@ namespace RunEverCs.Services
             ActionType type = ActionType.Group;
             ActionFlag flag = ActionFlag.None;
             bool sub = false;
+            bool off = false;
             string target = "";
 
             if (actionPart.Length > 0)
@@ -375,6 +428,17 @@ namespace RunEverCs.Services
                     }
                 }
 
+                // ★ 2026-11-17b（卡 E）：`off` 修饰位（第一种写法 = 规范形式）。
+                //   `run off "x.exe"` / `open sub "目录" off`：位于类型（/hide|show/sub）之后、
+                //   目标之前，且**后面还有目标**才算修饰位（避免把 `run off` 这种
+                //   "程序名就叫 off"的极端老配置在无目标时误判 —— 见下面的兜底规则）。
+                if (ap.Count >= idx + 2
+                    && string.Equals(ap[idx], "off", StringComparison.OrdinalIgnoreCase))
+                {
+                    off = true;
+                    idx++;
+                }
+
                 if (ap.Count >= idx + 1)
                 {
                     // 剩余部分作为目标（保留原样，含空格）
@@ -386,6 +450,22 @@ namespace RunEverCs.Services
                     // 只有类型+flag，无目标
                     target = "";
                 }
+
+                // ★ `off` 的第二种写法（HANDOFF 示例）：行尾 —— `run "x.exe" off`。
+                //   只对"目标是命令行"的四种动作生效：send / keys 的目标可能是 `turn off`
+                //   这种**内容**，吃成修饰位等于改语义 ⇒ 不放行（旧配置零变化）。
+                if (!off) off = TryStripTrailingOff(type, ref target);
+
+                // ★ `run off`（off 是最后一个 token、没有目标）：仍按修饰位处理 ——
+                //   与既有 `sub` 同口径（`open sub` 也是修饰位，不会被当成目录名）；
+                //   这样 FormatItem 写出的 `| run off` 能原样解析回来（往返幂等）。
+                if (!off && TrailOffTypes(type)
+                    && ap.Count == idx + 1
+                    && string.Equals(ap[idx], "off", StringComparison.OrdinalIgnoreCase))
+                {
+                    off = true;
+                    target = "";
+                }
             }
 
             var item = new MenuItem
@@ -395,11 +475,46 @@ namespace RunEverCs.Services
                 Type = type,
                 Flag = flag,
                 Sub = sub,
+                Off = off,
                 Target = target,
                 Level = level,
                 Line = lineNo
             };
             Groups[groupIdx].Items.Add(item);
+        }
+
+        /// <summary>
+        /// 行尾 `off` 的识别（卡 E）：目标**末位 token** 恰好是 `off` ⇒ 摘掉它并置位。
+        /// 只对 run/open/url/action 生效（见 <see cref="TrailOffTypes"/>）：
+        /// send / keys 的目标是**要发出去的内容**，`send  turn off` 必须原样保留。
+        /// 摘除时只切掉末尾那一个 token（前面的引号 / 空格 / 中文全部原样）。
+        /// </summary>
+        private static bool TryStripTrailingOff(ActionType type, ref string target)
+        {
+            if (!TrailOffTypes(type)) return false;
+            if (string.IsNullOrEmpty(target)) return false;
+
+            var parts = SplitWhitespace(target);
+            if (parts.Count < 2) return false;                       // 只有一个 token（如 `run off`）⇒ 不是行尾修饰位
+            if (!string.Equals(parts[parts.Count - 1], "off", StringComparison.OrdinalIgnoreCase)) return false;
+
+            int cut = target.LastIndexOf(parts[parts.Count - 1], StringComparison.Ordinal);
+            if (cut <= 0) return false;
+            string head = target.Substring(0, cut).TrimEnd(' ', '\t');
+            if (head.Length == 0) return false;
+
+            target = head;
+            return true;
+        }
+
+        /// <summary>
+        /// 允许"行尾 off / 无目标 off"的四种动作 —— 它们的目标一定是**命令行 / 路径 / 网址**，
+        /// 不会以 `off` 这个词作为语义内容。（send / keys 的目标是文本内容，group 没有动作。）
+        /// </summary>
+        private static bool TrailOffTypes(ActionType t)
+        {
+            return t == ActionType.Run || t == ActionType.Open
+                || t == ActionType.Url || t == ActionType.Action;
         }
 
         private static bool TryParseActionType(string s, out ActionType t)

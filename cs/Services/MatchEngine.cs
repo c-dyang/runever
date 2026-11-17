@@ -131,7 +131,9 @@ namespace RunEverCs.Services
             SetOneShot(d);
 
             // ---- R7 进程槽位 ----
-            var phits = MatchProcGroups(procG, ctx.ProcessNameLower);
+            // ★ 卡 E：同时带上前台窗口类名（`class:` 关键词用）。类名也是**值注入**，
+            //   判定层依旧零 IO。
+            var phits = MatchProcGroups(procG, ctx.ProcessNameLower, ctx.WinClass);
             var procSel = new List<MenuGroup>();
             if (phits.Count > 0)
             {
@@ -178,13 +180,15 @@ namespace RunEverCs.Services
             }
 
             // 剪枝后的可执行条目 = 非分组标题的叶条目（缺件/空壳已被 FilterMissing 干掉）
+            // ★ 卡 E：`off`（临时禁用）条目**不算**可执行条目 —— 否则扩展名槽位只有一条 off 时
+            //   会被"一键直达"绕过菜单直接执行，`off` 的承诺（点了不执行）当场破产。
             MenuItem only = null;
             int exec = 0;
             if (g.Items != null)
             {
                 foreach (var it in g.Items)
                 {
-                    if (it == null || it.IsGroupHeader) continue;
+                    if (it == null || it.IsGroupHeader || it.Off) continue;
                     exec++;
                     only = it;
                 }
@@ -241,14 +245,39 @@ namespace RunEverCs.Services
             return hits;
         }
 
-        /// <summary>进程命中组（关键词可写 "chrome" 或 "chrome.exe"）。</summary>
+        /// <summary>
+        /// 进程命中组（关键词可写 "chrome" 或 "chrome.exe"）。
+        /// ★ 卡 E（2026-11-17b）：关键词还可写成 `class:类名` ⇒ 按**前台窗口类名**匹配；
+        ///   本重载没有类名可用 ⇒ 只走进程名（旧调用方逐字不变）。
+        /// </summary>
         public static List<MenuGroup> MatchProcGroups(IList<MenuGroup> procGroups, string procLower)
+        {
+            return MatchProcGroups(procGroups, procLower, "");
+        }
+
+        /// <summary>
+        /// 进程命中组（卡 E 扩展：`class:` 槽位）。
+        ///
+        /// 口径：
+        ///   · 关键词带 `class:` 前缀（大小写不敏感）⇒ 与 <paramref name="winClassLower"/>
+        ///     比前台窗口类名（同样大小写不敏感）；不带前缀 ⇒ 仍是进程名比对（**旧配置零变化**）；
+        ///   · 同一组里两种可以混写，组内语义 = **或**（命中任一关键词即整组命中）；
+        ///   · 类名为空（采集没拿到 / 老采集链）⇒ `class:` 关键词一律判不命中，
+        ///     **绝不回退**成进程名匹配（否则 `class:CabinetWClass` 会去比进程名，语义错位）。
+        /// ★ 纯函数、零 IO：类名由调用方从采集结果注入（见 MatchContext.WinClass），
+        ///   本层不调用 GetClassName、不碰窗口句柄。
+        /// </summary>
+        public static List<MenuGroup> MatchProcGroups(IList<MenuGroup> procGroups, string procLower,
+            string winClassLower)
         {
             var hits = new List<MenuGroup>();
             if (procGroups == null || procGroups.Count == 0) return hits;
-            if (string.IsNullOrEmpty(procLower)) return hits;
 
-            string noExt = procLower;
+            string proc = (procLower ?? "").Trim().ToLowerInvariant();
+            string wcls = (winClassLower ?? "").Trim().ToLowerInvariant();
+            if (proc.Length == 0 && wcls.Length == 0) return hits;
+
+            string noExt = proc;
             if (noExt.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
                 noExt = noExt.Substring(0, noExt.Length - 4);
 
@@ -260,14 +289,65 @@ namespace RunEverCs.Services
                 {
                     foreach (var raw in g.Keywords)
                     {
-                        string k = (raw ?? "").Trim().ToLowerInvariant();
+                        string k = (raw ?? "").Trim();
                         if (k.Length == 0) continue;
-                        if (k == procLower || k == noExt) { hit = true; break; }
+
+                        // ---- `class:` 槽位 ----
+                        if (IsWindowClassKeyword(k))
+                        {
+                            if (wcls.Length == 0) continue;
+                            string cls = WindowClassOf(k).ToLowerInvariant();
+                            if (cls.Length > 0 && string.Equals(cls, wcls, StringComparison.Ordinal))
+                            {
+                                hit = true;
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // ---- 进程名槽位（既有口径，一位没改）----
+                        string kl = k.ToLowerInvariant();
+                        if (proc.Length > 0 && (kl == proc || kl == noExt)) { hit = true; break; }
                     }
                 }
                 if (hit) hits.Add(g);
             }
             return hits;
+        }
+
+        /// <summary>`proc` 组关键词的槽位种类（卡 E）。</summary>
+        public enum ProcKeywordKind
+        {
+            /// <summary>普通关键词 ⇒ 按**进程名**匹配（既有语义）。</summary>
+            Process = 0,
+
+            /// <summary>`class:类名` ⇒ 按**前台窗口类名**匹配。</summary>
+            WindowClass = 1
+        }
+
+        /// <summary>`class:` 前缀（大小写不敏感）。</summary>
+        public const string WindowClassPrefix = "class:";
+
+        /// <summary>这个关键词是不是类名槽位（`class:` 前缀 + 后面至少一个字符）。</summary>
+        public static bool IsWindowClassKeyword(string keyword)
+        {
+            if (string.IsNullOrEmpty(keyword)) return false;
+            string k = keyword.Trim();
+            return k.Length > WindowClassPrefix.Length
+                && k.StartsWith(WindowClassPrefix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>取 `class:` 之后的类名（去前后空白，大小写原样）；不是类名槽位 ⇒ 空串。</summary>
+        public static string WindowClassOf(string keyword)
+        {
+            if (!IsWindowClassKeyword(keyword)) return "";
+            return keyword.Trim().Substring(WindowClassPrefix.Length).Trim();
+        }
+
+        /// <summary>关键词归属哪个槽位（解析结果的"识别"口径；自检据此断言）。</summary>
+        public static ProcKeywordKind KeywordKind(string keyword)
+        {
+            return IsWindowClassKeyword(keyword) ? ProcKeywordKind.WindowClass : ProcKeywordKind.Process;
         }
 
         /// <summary>关键词归一化：去前后空白、去前导点、小写。</summary>

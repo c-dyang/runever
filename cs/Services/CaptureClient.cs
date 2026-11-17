@@ -28,6 +28,12 @@ namespace RunEverCs.Services
         private readonly string _tempDir;
         private readonly int _timeoutMs;
 
+        /// <summary>Kill 之后等进程退出的上限（ms）—— 保证"杀完不留僵尸"（卡 C）。</summary>
+        private const int KillWaitMs = 2000;
+
+        /// <summary>输出文件名的进程内自增序号（并行采集时防同 tick 同名，卡 C）。</summary>
+        private static int _seq;
+
         public CaptureClient(string root, string ahkExe = null, int timeoutMs = 3000)
         {
             _ahkExe = string.IsNullOrEmpty(ahkExe)
@@ -86,7 +92,10 @@ namespace RunEverCs.Services
             }
             catch { }
 
-            string outFile = Path.Combine(_tempDir, "cap_" + DateTime.Now.Ticks + ".json");
+            // ★ 卡 C：并行探测会让两次采集可能**同时**在跑，而 DateTime.Now.Ticks 在 Windows 上
+            //   只有 ~15.6ms 粒度（同一 tick 内两次调用取值相同）⇒ 加进程内自增序号防同名。
+            string outFile = Path.Combine(_tempDir,
+                "cap_" + DateTime.Now.Ticks + "_" + System.Threading.Interlocked.Increment(ref _seq) + ".json");
             string tmpFile = outFile + ".tmp";
             try { if (File.Exists(outFile)) File.Delete(outFile); } catch { }
             try { if (File.Exists(tmpFile)) File.Delete(tmpFile); } catch { }
@@ -116,7 +125,11 @@ namespace RunEverCs.Services
 
                 if (!exited)
                 {
+                    // ★ 卡 C（2026-11-17）：杀完必须**等进程真的退出**。
+                    //   只 Kill 不 WaitForExit，CaptureRunner 的句柄/进程对象会在本方法
+                    //   返回后还挂一小会儿 —— 自检的「无僵尸」计数就会抖。
                     try { proc.Kill(); } catch { }
+                    try { proc.WaitForExit(KillWaitMs); } catch { }
                     if (log != null) log("采集超时（" + _timeoutMs + "ms），已杀进程");
                     return ctx;
                 }

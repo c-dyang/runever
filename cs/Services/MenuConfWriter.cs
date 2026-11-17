@@ -349,12 +349,20 @@ namespace RunEverCs.Services
     /// ★ 安全纪律（吸取 AHK 版越界损坏配置的教训）：
     ///   ① 写前备份 menus.conf.bak.&lt;时间戳&gt;（保留最近 10 份）
     ///   ② ★ C1：**校验通过之前一个字节都不写**（不备份、不建 tmp、不 rename）
-    ///   ③ 原子写：写 `*.tmp` → **回读 tmp 解析 + 结构与内存一致 + 再序列化逐字节一致** → rename 覆盖
+    ///   ③ 原子写：写 `*.tmp` → **回读 tmp 解析 + 结构与内存一致 + 再走一遍同一条写法逐字节一致** → rename 覆盖
     ///   ④ 回读不通过 ⇒ 删 tmp、原文件一字节不动、返回可读原因
     ///   失败语义是**全有或全无**：绝不"尽力写一半"。
     ///
-    /// ⚠️ 已知代价：注释会丢失（分组/条目的自由文本行无法保留原始装饰注释）。
-    ///    如需保留注释请用「窄写回」模式（只改条目行），本轮未实现。
+    /// ★ 窄写回（2026-11-17 / 卡 B）：保存**不再整份重写**。
+    ///   读入原文的原始行数组（含每行确切文本 + 行尾风格 + BOM 状态），与内存模型做行级对齐：
+    ///     · 内容没变的条目行 / 分组行 —— **原字节照抄**（连手写的怪缩进/怪空格都不动）
+    ///     · 内容变了的条目行 —— 只重写这一行（格式照抄 <see cref="FormatItem"/>）
+    ///     · 新增条目 —— 插在上一条之后（本组最后一条之后 = 其父项子树末尾）
+    ///     · 删除条目 —— 只删它自己那一行（子树按模型已展开 ⇒ 每行各删各的）
+    ///     · 注释 / 空行 / 认不出的行 —— 原样保留，不猜、不合并、不删
+    ///   分组数变化（新增/删除分组）等"行级对齐做不到"的情形，退回整份重写（老行为）。
+    ///   窄写回产物还要过 <see cref="VerifyTmp"/>：**把产物当原文再窄写一次必须逐字节相同**，
+    ///   且所有非条目行与原文逐字节相同；任一条不成立 ⇒ 退回整份重写再验（宁丢注释，不能丢保存）。
     /// </summary>
     public class MenuConfWriter
     {
@@ -414,9 +422,7 @@ namespace RunEverCs.Services
                 foreach (var g in groups)
                 {
                     if (g == null) continue;
-                    string kw = (g.Keywords != null && g.Keywords.Count > 0)
-                        ? "  " + string.Join(" ", g.Keywords) : "";
-                    sb.AppendLine("! " + g.Name + "  " + MenuGroup.TypeToString(g.Type) + kw);
+                    sb.AppendLine(FormatGroup(g));
 
                     if (g.Items != null)
                         foreach (var it in g.Items)
@@ -430,6 +436,17 @@ namespace RunEverCs.Services
             }
 
             return sb.ToString();
+        }
+
+        /// <summary>单分组 → 一行文本（`! 名称  类型  [关键词...]`）。
+        /// ★ 唯一实现：整份重写（<see cref="Serialize"/>）与窄写回（分组行真的改了才重写）
+        ///   共用这一份，免得两条路径的格式漂移。</summary>
+        public static string FormatGroup(MenuGroup g)
+        {
+            if (g == null) return "";
+            string kw = (g.Keywords != null && g.Keywords.Count > 0)
+                ? "  " + string.Join(" ", g.Keywords) : "";
+            return "! " + g.Name + "  " + MenuGroup.TypeToString(g.Type) + kw;
         }
 
         /// <summary>单条目 → 一行文本（缩进按 Level）。</summary>
@@ -469,6 +486,13 @@ namespace RunEverCs.Services
                 if (it.Type == ActionType.Open && it.Sub)
                     sb.Append(" sub");
 
+                // ★ 2026-11-17b（卡 E）：`off`（临时禁用）也必须原样回写 ——
+                //   否则"编辑器保存一次就把禁用悄悄恢复成可点"（用户以为关了、其实能点）。
+                //   写成**修饰位形态**（`| run off  "x.exe"`）而不是行尾：所有动作类型都能
+                //   原样解析回来（行尾形态对 send/keys 的目标是内容、解析层不吃）。
+                if (it.Off && it.Type != ActionType.Separator)
+                    sb.Append(" off");
+
                 if (!string.IsNullOrEmpty(it.Target))
                     sb.Append("  ").Append(it.Target);
             }
@@ -488,6 +512,314 @@ namespace RunEverCs.Services
                 case ActionType.Keys: return "keys";
                 default: return "group";
             }
+        }
+
+        // ============================================================
+        // ★ 窄写回（卡 B）：只重写变化了的条目行，其余行逐字节照抄
+        // ============================================================
+
+        /// <summary>窄写回的动作计数（写盘说明里给人看的那一句）。</summary>
+        public sealed class NarrowWriteStats
+        {
+            public int GroupLinesRewritten;
+            public int ItemsRewritten;
+            public int ItemsInserted;
+            public int ItemsDeleted;
+            public int LinesKept;          // 原字节照抄的行数（注释/空行/未变的条目行）
+
+            public override string ToString()
+            {
+                return "改 " + ItemsRewritten + " 行 / 新增 " + ItemsInserted
+                    + " / 删除 " + ItemsDeleted + "；分组行改 " + GroupLinesRewritten
+                    + "；其余 " + LinesKept + " 行原样保留（注释/空行未动）";
+            }
+        }
+
+        /// <summary>一行原文：<see cref="Text"/> 不含行尾，<see cref="Eol"/> = "\r\n" / "\n" / "\r" / ""。</summary>
+        private sealed class RawLine
+        {
+            public string Text;
+            public string Eol;
+            public RawLine(string text, string eol) { Text = text; Eol = eol; }
+        }
+
+        /// <summary>
+        /// 窄写回：以 <paramref name="originalText"/> 为底，只改**确实变了**的行。
+        /// 返回 null = 本次不适用（调用方退回整份重写），条件只有两个：
+        ///   · 原文为空 / 拿不到老模型（调用方没读过盘）；
+        ///   · 分组**数目**变了（增删分组要搬整块、还要决定被删分组里的注释往哪放，
+        ///     与"非条目行条数/顺序都不许变"的不变式冲突 ⇒ 不猜，整份重写）。
+        ///     分组**改名/改类型/改关键词**可以窄写（只重写那一行分组行）。
+        /// </summary>
+        /// <param name="oldGroups">磁盘原文的解析结果（行号来源 —— 分类口径与解析器**同一份**，不另写一套）。</param>
+        public static string BuildNarrowText(string originalText, List<MenuGroup> oldGroups,
+            List<MenuGroup> groups, out NarrowWriteStats stats)
+        {
+            stats = new NarrowWriteStats();
+            if (string.IsNullOrEmpty(originalText) || oldGroups == null || groups == null) return null;
+
+            var lines = SplitRaw(originalText);
+            if (lines.Count == 0) return null;
+
+            string defaultEol = "\r\n";
+            for (int i = 0; i < lines.Count; i++)
+                if (lines[i].Eol.Length > 0) { defaultEol = lines[i].Eol; break; }
+
+            // 分组必须一一对应（数目一样），否则退回整份重写
+            if (oldGroups.Count != groups.Count || oldGroups.Count == 0) return null;
+
+            var outp = new List<RawLine>(lines.Count + 16);
+
+            // ---- 逐组：分组行 + 本组块（块内逐条目行对齐）----
+            var gline = new int[groups.Count];
+            for (int i = 0; i < oldGroups.Count; i++)
+            {
+                var og = oldGroups[i];
+                if (og == null) return null;
+                int ln = og.Line - 1;
+                if (ln < 0 || ln >= lines.Count) return null;
+                string t = lines[ln].Text.Trim(' ', '\t');
+                if (t.Length == 0 || t[0] != '!') return null;      // 行号对不上 ⇒ 不猜，退回整份重写
+                if (i > 0 && ln <= gline[i - 1]) return null;
+                gline[i] = ln;
+            }
+
+            // 第一个分组之前的内容（文件头注释块等）原样照抄
+            for (int i = 0; i < gline[0]; i++) { outp.Add(lines[i]); stats.LinesKept++; }
+
+            for (int gi = 0; gi < groups.Count; gi++)
+            {
+                var g = groups[gi];
+                var og = oldGroups[gi];
+                if (g == null || og == null) return null;
+
+                int gidx = gline[gi];
+                int blockEnd = (gi + 1 < groups.Count) ? gline[gi + 1] : lines.Count;
+
+                // ---- 分组行：语义没变就照抄原字节（手写的怪空格也不动）----
+                if (SameGroup(og, g))
+                {
+                    outp.Add(lines[gidx]); stats.LinesKept++;
+                }
+                else
+                {
+                    outp.Add(new RawLine(FormatGroup(g), EolOr(lines[gidx], defaultEol)));
+                    stats.GroupLinesRewritten++;
+                }
+
+                // ---- 本组条目行的行号 = 解析器给的行号（权威，不另写一套分类）----
+                var oldItems = og.Items ?? new List<MenuItem>();
+                var newItems = g.Items ?? new List<MenuItem>();
+                var oldLine = new int[oldItems.Count];
+                for (int k = 0; k < oldItems.Count; k++)
+                {
+                    if (oldItems[k] == null) return null;
+                    int l2 = oldItems[k].Line - 1;
+                    if (l2 <= gidx || l2 >= blockEnd) return null;          // 行号越界 / 串到别组
+                    if (k > 0 && l2 <= oldLine[k - 1]) return null;         // 行号必须严格递增
+                    oldLine[k] = l2;
+                }
+
+                int[] match = AlignItems(oldItems, newItems);   // match[k] = 新下标；-1 = 已删除
+                var matchedNew = new bool[newItems.Count];
+                for (int k = 0; k < match.Length; k++)
+                    if (match[k] >= 0 && match[k] < newItems.Count) matchedNew[match[k]] = true;
+
+                int pos = gidx + 1;
+                int nj = 0;
+                for (int k = 0; k < oldItems.Count; k++)
+                {
+                    // 条目行之间的注释 / 空行：原样照抄
+                    while (pos < oldLine[k]) { outp.Add(lines[pos]); stats.LinesKept++; pos++; }
+                    if (pos != oldLine[k]) return null;         // 行号自相矛盾 ⇒ 不猜，退回整份重写
+
+                    int target = match[k];
+                    if (target < 0)
+                    {
+                        pos++;                                  // ★ 删除：只丢它自己这一行
+                        stats.ItemsDeleted++;
+                        continue;
+                    }
+
+                    // 新增条目插在上一条之后（= 其父项子树末尾）
+                    while (nj < target)
+                    {
+                        if (!matchedNew[nj] && newItems[nj] != null)
+                        {
+                            outp.Add(new RawLine(FormatItem(newItems[nj]), EolOfLast(outp, defaultEol)));
+                            stats.ItemsInserted++;
+                        }
+                        nj++;
+                    }
+
+                    var ni = newItems[target];
+                    if (ni == null) return null;
+                    if (SameItem(oldItems[k], ni))
+                    {
+                        outp.Add(lines[pos]);                   // 内容没变：原字节照抄
+                        stats.LinesKept++;
+                    }
+                    else
+                    {
+                        outp.Add(new RawLine(FormatItem(ni), EolOr(lines[pos], defaultEol)));
+                        stats.ItemsRewritten++;
+                    }
+                    pos++;
+                    nj = target + 1;
+                }
+
+                // 本组尾部的新增条目：放在"最后一条之后、组间空行之前"，
+                // 否则新条目会掉到下一组的视觉块里（语义没错，但看着像写错了）。
+                while (nj < newItems.Count)
+                {
+                    if (!matchedNew[nj] && newItems[nj] != null)
+                    {
+                        outp.Add(new RawLine(FormatItem(newItems[nj]), EolOfLast(outp, defaultEol)));
+                        stats.ItemsInserted++;
+                    }
+                    nj++;
+                }
+
+                // 本组块剩余行（组间空行 / 组尾注释）原样照抄
+                while (pos < blockEnd) { outp.Add(lines[pos]); stats.LinesKept++; pos++; }
+            }
+
+            return JoinRaw(outp, defaultEol);
+        }
+
+        /// <summary>
+        /// 条目行级对齐（同一分组内，按顺序单调匹配）。
+        /// 判据是"逐字段完全相同"（标题/快捷键/动作/flag/sub/目标/层级）：
+        ///   · 对得上 ⇒ 同一行（内容没变 ⇒ 原字节保留）
+        ///   · 对不上但有窗口内的错位 ⇒ 判定为插入 / 删除
+        ///   · 都对不上 ⇒ 判定为"就地修改"，仍占这一行（★ 只重写这一行）
+        /// 返回 match[k] = 新条目下标，-1 = 该老条目已删除。
+        /// 复杂度 O(n * Window)：条目数上万（现场 24960 项）也不能退化成 O(n²)。
+        /// </summary>
+        private static int[] AlignItems(List<MenuItem> oldItems, List<MenuItem> newItems)
+        {
+            int m = oldItems.Count, n = newItems.Count;
+            var match = new int[m];
+            for (int k = 0; k < m; k++) match[k] = -1;
+
+            const int Window = 32;
+            int j = 0;
+            for (int k = 0; k < m; k++)
+            {
+                if (j >= n) break;                                  // 后面的老条目全被删了
+
+                if (SameItem(oldItems[k], newItems[j])) { match[k] = j; j++; continue; }
+
+                int ins = -1;      // 新条目多出来的（插入）
+                for (int d = 1; d <= Window && j + d < n; d++)
+                    if (SameItem(oldItems[k], newItems[j + d])) { ins = d; break; }
+
+                int del = -1;      // 老条目多出来的（删除）
+                for (int d = 1; d <= Window && k + d < m; d++)
+                    if (SameItem(oldItems[k + d], newItems[j])) { del = d; break; }
+
+                if (del > 0 && (ins < 0 || del <= ins)) continue;   // 本条删除，下一轮再对上
+                if (ins > 0) { j += ins; match[k] = j; j++; continue; }
+                match[k] = j; j++;                                  // 就地修改
+            }
+            return match;
+        }
+
+        private static bool SameItem(MenuItem a, MenuItem b)
+        {
+            if (a == null || b == null) return false;
+            return string.Equals(a.Title ?? "", b.Title ?? "", StringComparison.Ordinal)
+                && string.Equals(a.Hotkey ?? "", b.Hotkey ?? "", StringComparison.Ordinal)
+                && string.Equals(a.Target ?? "", b.Target ?? "", StringComparison.Ordinal)
+                && a.Type == b.Type && a.Flag == b.Flag && a.Sub == b.Sub && a.Level == b.Level
+                // ★ 卡 E：`off` 参与"内容是否没变"的判定 —— 用户把一条从禁用改回可用，
+                //   必须真的重写这一行；不比较就会照抄原字节 ⇒ 改了却没落盘（假保存）。
+                && a.Off == b.Off;
+        }
+
+        private static bool SameGroup(MenuGroup a, MenuGroup b)
+        {
+            if (a == null || b == null) return false;
+            if (!string.Equals(a.Name ?? "", b.Name ?? "", StringComparison.Ordinal)) return false;
+            if (a.Type != b.Type) return false;
+            var ka = a.Keywords ?? new List<string>();
+            var kb = b.Keywords ?? new List<string>();
+            if (ka.Count != kb.Count) return false;
+            for (int i = 0; i < ka.Count; i++)
+                if (!string.Equals(ka[i] ?? "", kb[i] ?? "", StringComparison.Ordinal)) return false;
+            return true;
+        }
+
+        private static string EolOr(RawLine line, string fallback)
+        {
+            return (line != null && line.Eol.Length > 0) ? line.Eol : fallback;
+        }
+
+        private static string EolOfLast(List<RawLine> outp, string fallback)
+        {
+            if (outp.Count == 0) return fallback;
+            string e = outp[outp.Count - 1].Eol;
+            return e.Length > 0 ? e : fallback;
+        }
+
+        /// <summary>按行拆原文，**保留每行确切文本与行尾风格**（CRLF / LF / CR / 末行无行尾）。</summary>
+        private static List<RawLine> SplitRaw(string s)
+        {
+            var list = new List<RawLine>();
+            int i = 0;
+            while (i < s.Length)
+            {
+                int start = i;
+                while (i < s.Length && s[i] != '\r' && s[i] != '\n') i++;
+                string text = s.Substring(start, i - start);
+                string eol = "";
+                if (i < s.Length)
+                {
+                    if (s[i] == '\r' && i + 1 < s.Length && s[i + 1] == '\n') { eol = "\r\n"; i += 2; }
+                    else { eol = s[i] == '\r' ? "\r" : "\n"; i++; }
+                }
+                list.Add(new RawLine(text, eol));
+            }
+            return list;
+        }
+
+        /// <summary>拼回文本。中间行没有行尾的（原文末行无换行，后面又插了新行）补默认行尾。</summary>
+        private static string JoinRaw(List<RawLine> lines, string defaultEol)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string eol = lines[i].Eol;
+                if (eol.Length == 0 && i < lines.Count - 1) eol = defaultEol;
+                sb.Append(lines[i].Text).Append(eol);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// 非条目行 = 原文里既不是分组行、也不是任何条目行的行（注释 / 空行 / 认不出的行）。
+        /// 窄写回承诺这些行**逐字节不变**；<see cref="VerifyTmp"/> 与自检都按这个口径比对。
+        /// </summary>
+        public static List<string> OpaqueLines(string text, List<MenuGroup> parsedGroups)
+        {
+            var result = new List<string>();
+            if (text == null) return result;
+            var lines = SplitRaw(text);
+            var skip = new HashSet<int>();
+            if (parsedGroups != null)
+            {
+                foreach (var g in parsedGroups)
+                {
+                    if (g == null) continue;
+                    skip.Add(g.Line - 1);
+                    if (g.Items == null) continue;
+                    foreach (var it in g.Items)
+                        if (it != null) skip.Add(it.Line - 1);
+                }
+            }
+            for (int i = 0; i < lines.Count; i++)
+                if (!skip.Contains(i)) result.Add(lines[i].Text + "\u0000" + lines[i].Eol);
+            return result;
         }
 
         /// <summary>
@@ -519,6 +851,11 @@ namespace RunEverCs.Services
         /// ★ C1：结构校验放在**任何写动作之前**（备份/ tmp / rename 全在它后面）。
         ///   顺序一旦反了（先写 tmp 再校验再 rename），"用户点保存"那一刻就已经动过磁盘，
         ///   等于没闸。
+        ///
+        /// ★ 卡 B：待写文本先由 <see cref="BuildNarrowText"/> 窄写回产出（行级对齐），
+        ///   做不到才用 <see cref="Serialize"/> 整份重写；窄写回产物必须同时过
+        ///   "结构与模型一致 / 再窄写一次逐字节相同 / 非条目行逐字节相同"三关，
+        ///   任一关不过就**退回整份重写再验**（能保存优先于保注释）。
         /// </summary>
         public bool Save(List<MenuGroup> groups, out string message, out List<MenuStructureIssue> issues)
         {
@@ -540,12 +877,14 @@ namespace RunEverCs.Services
                 // ---- 磁盘现状（硬闸用）----
                 int diskGroupsBefore = 0, diskItemsBefore = 0;
                 bool diskParsed = true;      // 原文件不存在 ⇒ 视为"没有可保护的内容"
+                ConfParser diskParser = null; // ★ 窄写回的行号来源（与硬闸共用同一次解析）
                 if (File.Exists(_confPath) && new FileInfo(_confPath).Length > 0)
                 {
                     try
                     {
                         var old = new ConfParser(_confPath);
                         old.Parse();
+                        diskParser = old;
                         diskGroupsBefore = old.Groups.Count;
                         foreach (var g in old.Groups) diskItemsBefore += g.Items.Count;
                     }
@@ -585,7 +924,18 @@ namespace RunEverCs.Services
                     return false;
                 }
 
-                string text = Serialize(groups);
+                // ---- ★ 待写内容：优先**窄写回**（只改变化的行），做不到才整份重写 ----
+                string originalText;
+                bool originalHasBom;
+                originalText = ReadOriginalText(out originalHasBom);
+
+                NarrowWriteStats narrow = null;
+                string text = null;
+                if (originalText != null && diskParser != null)
+                    text = BuildNarrowText(originalText, diskParser.Groups, groups, out narrow);
+                bool narrowUsed = text != null;
+                if (text == null) text = Serialize(groups);
+                string narrowNote = "";
 
                 // ---- ① 备份（只有"真要写"才做；被拒的保存不留垃圾备份）----
                 if (File.Exists(_confPath))
@@ -601,13 +951,27 @@ namespace RunEverCs.Services
                     catch { backupPath = null; }
                 }
 
-                // ---- ② 写 tmp ----
-                if (File.Exists(tmp)) File.Delete(tmp);
-                File.WriteAllText(tmp, text, new UTF8Encoding(false));
+                // ---- ② 写 tmp（BOM 状态：窄写回原样保留；整份重写沿用"UTF-8 无 BOM"）----
+                WriteTmp(tmp, text, narrowUsed && originalHasBom);
 
                 // ---- ③ ★ 回读校验 tmp（通过才允许 rename）----
                 string why;
-                if (!VerifyTmp(tmp, groups, text, out why))
+                bool verified = VerifyTmp(tmp, groups, text,
+                    narrowUsed ? originalText : null, narrowUsed ? diskParser.Groups : null, out why);
+
+                // ★ 窄写回自校验没过 ⇒ 退回整份重写再验一次。
+                //   口径：**"能保存"优先于"保留注释"** —— 宁可这一次丢注释，也不能让用户存不进去。
+                if (!verified && narrowUsed)
+                {
+                    text = Serialize(groups);
+                    narrowUsed = false;
+                    narrow = null;
+                    WriteTmp(tmp, text, false);
+                    verified = VerifyTmp(tmp, groups, text, null, null, out why);
+                    if (verified) narrowNote = "\n（窄写回自校验未通过，本次已退回整份重写）";
+                }
+
+                if (!verified)
                 {
                     TryDelete(tmp);
                     message = "已取消保存（menus.conf 原样未动）：" + why;
@@ -638,6 +1002,8 @@ namespace RunEverCs.Services
                 TryDelete(tmp);
 
                 message = "已保存（分组 " + groups.Count + "，条目 " + newItems + "）"
+                    + (narrowUsed && narrow != null ? "\n窄写回：" + narrow.ToString() : "")
+                    + narrowNote
                     + (backupPath != null ? "\n备份：" + Path.GetFileName(backupPath) : "");
                 return true;
             }
@@ -653,14 +1019,52 @@ namespace RunEverCs.Services
             }
         }
 
+        /// <summary>读原文（原样字节 → 文本）。拿不到 / 不是 UTF-8 系 ⇒ null（本次不窄写）。
+        /// <paramref name="hasBom"/> = 原文带 UTF-8 BOM（窄写回要把它原样写回去）。</summary>
+        private string ReadOriginalText(out bool hasBom)
+        {
+            hasBom = false;
+            try
+            {
+                if (!File.Exists(_confPath)) return null;
+                byte[] raw = File.ReadAllBytes(_confPath);
+                if (raw.Length == 0) return null;
+
+                // UTF-16 / UTF-32 的 BOM：解析器本身按 UTF-8 读，这类文件不窄写（别在半懂的状态下改写它）
+                if (raw.Length >= 2)
+                {
+                    bool le16 = raw[0] == 0xFF && raw[1] == 0xFE;
+                    bool be16 = raw[0] == 0xFE && raw[1] == 0xFF;
+                    if (le16 || be16) return null;
+                }
+
+                hasBom = raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF;
+                return hasBom
+                    ? Encoding.UTF8.GetString(raw, 3, raw.Length - 3)
+                    : Encoding.UTF8.GetString(raw);
+            }
+            catch { return null; }
+        }
+
+        private static void WriteTmp(string tmp, string text, bool withBom)
+        {
+            if (File.Exists(tmp)) File.Delete(tmp);
+            File.WriteAllText(tmp, text, new UTF8Encoding(withBom));
+        }
+
         /// <summary>
-        /// 回读 <paramref name="tmp"/> 校验三件事，任一不成立都不许覆盖原文件：
+        /// 回读 <paramref name="tmp"/> 校验四件事，任一不成立都不许覆盖原文件：
         ///   ① 能解析（解析器不抛异常）；
         ///   ② 解析结果与内存模型**逐条一致**（分组数 / 条目数 / 标题 / 层级 / 类型 / 目标 / 快捷键）；
-        ///   ③ 解析后再序列化与写入内容**逐字节一致**（否则"存一次变一次"，幂等性破了）。
+        ///   ③ 幂等：**把写出的内容当原文再窄写一次，必须逐字节相同**（整份重写的产物则退回
+        ///      "解析后再序列化逐字节相同"这同一条判据）—— 破了就会"存一次变一次"；
+        ///   ④ 窄写回时：**所有非条目行与原文逐字节相同**（注释 / 空行一个都不许动）。
         /// 另外对**落盘内容**再跑一遍结构校验（保证磁盘上那份自身合法，而不只是内存那份合法）。
         /// </summary>
-        private static bool VerifyTmp(string tmp, List<MenuGroup> groups, string text, out string why)
+        /// <param name="originalText">窄写回前的原文（整份重写传 null ⇒ 跳过 ④）。</param>
+        /// <param name="oldParsedGroups">原文的解析结果（行号来源；整份重写传 null）。</param>
+        private static bool VerifyTmp(string tmp, List<MenuGroup> groups, string text,
+            string originalText, List<MenuGroup> oldParsedGroups, out string why)
         {
             why = "";
             ConfParser check;
@@ -713,7 +1117,9 @@ namespace RunEverCs.Services
                     if (x == null) continue;
                     if ((x.Title ?? "") != (y.Title ?? "") || x.Level != y.Level
                         || x.Type != y.Type || (x.Target ?? "") != (y.Target ?? "")
-                        || (x.Hotkey ?? "") != (y.Hotkey ?? "") || x.Flag != y.Flag)
+                        || (x.Hotkey ?? "") != (y.Hotkey ?? "") || x.Flag != y.Flag
+                        // ★ 卡 E：`off` 也要核 —— 写丢了它等于"临时关闭"悄悄失效
+                        || x.Off != y.Off)
                     {
                         why = "回读不一致：分组「" + a.Name + "」第 " + (k + 1) + " 条（存「"
                             + x.Title + " lv" + x.Level + " " + x.Type + "」，盘「"
@@ -724,13 +1130,39 @@ namespace RunEverCs.Services
                 }
             }
 
-            // ③ 逐字节幂等：解析后再序列化必须与刚写出的内容完全一样
-            string again = Serialize(check.Groups);
+            // ③ 幂等：把写出的内容当原文**再走一遍同一条写法**，必须逐字节相同
+            //     · 窄写回 ⇒ 再窄写一次（老模型 = 刚回读出来的模型 ⇒ 应当一个字都不改）
+            //     · 整份重写 ⇒ 解析后再序列化（老判据原样保留）
+            NarrowWriteStats againStats;
+            string again = (originalText != null)
+                ? BuildNarrowText(text, check.Groups, check.Groups, out againStats)
+                : Serialize(check.Groups);
+            if (again == null) again = Serialize(check.Groups);
             if (!string.Equals(again, text, StringComparison.Ordinal))
             {
-                why = "回读后再序列化与写入内容不一致（存 " + text.Length + "B / 回读再写 "
+                why = "回读后再走一遍同一条写法与写入内容不一致（存 " + text.Length + "B / 回读再写 "
                     + again.Length + "B）—— 存一次变一次，已删除临时文件，原文件未改动";
                 return false;
+            }
+
+            // ③b 窄写回：非条目行（注释 / 空行 / 认不出的行）必须与原文**逐字节相同**
+            if (originalText != null)
+            {
+                var before = OpaqueLines(originalText, oldParsedGroups);
+                var after = OpaqueLines(text, check.Groups);
+                int diff = -1;
+                for (int i = 0; i < Math.Min(before.Count, after.Count); i++)
+                    if (!string.Equals(before[i], after[i], StringComparison.Ordinal)) { diff = i; break; }
+                if (diff < 0 && before.Count != after.Count) diff = Math.Min(before.Count, after.Count);
+                if (diff >= 0)
+                {
+                    string a1 = diff < before.Count ? before[diff].Replace("\u0000", "⟪EOL⟫") : "<无>";
+                    string b1 = diff < after.Count ? after[diff].Replace("\u0000", "⟪EOL⟫") : "<无>";
+                    why = "窄写回动了非条目行（第 " + (diff + 1) + " 行非条目行：原「" + a1 + "」/ 新「" + b1
+                        + "」，原文 " + before.Count + " 行 / 新文 " + after.Count + " 行）"
+                        + " —— 已删除临时文件，原文件未改动";
+                    return false;
+                }
             }
 
             // ④ 落盘内容自身的结构校验

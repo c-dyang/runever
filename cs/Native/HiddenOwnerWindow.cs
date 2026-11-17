@@ -28,7 +28,16 @@ namespace RunEverCs.Native
     public class HiddenOwnerWindow : IDisposable
     {
         private Window _w;
+        private HwndSource _src;
         public IntPtr Handle { get; private set; } = IntPtr.Zero;
+
+        /// <summary>
+        /// ★ 卡 D（2026-11-17b）：菜单项上松开右键的转发口 —— (hMenu, 零基索引)。
+        ///   WM_MENURBUTTONUP 是 **sent** 消息（不进消息队列），线程级 WH_MSGFILTER 抓不到，
+        ///   只能挂在 owner 的窗口过程上；本窗口作为 owner 时由这里转发给策略层。
+        ///   为空 / 处理失败一律不影响主菜单（异常在下面吞掉）。
+        /// </summary>
+        public Action<IntPtr, int> MenuButtonUp;
 
         public HiddenOwnerWindow()
         {
@@ -57,7 +66,41 @@ namespace RunEverCs.Native
             {
                 int ex = GetWindowLong(Handle, GWL_EXSTYLE);
                 SetWindowLong(Handle, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+
+                // ★ 卡 D：挂窗口过程钩子（只截 WM_MENURBUTTONUP，其余原样放行）。
+                //   HwndSource.AddHook 装在这张窗口的 WndProc 链上 ⇒ sent 消息也能收到。
+                try
+                {
+                    _src = HwndSource.FromHwnd(Handle);
+                    if (_src != null) _src.AddHook(WndProcHook);
+                }
+                catch { _src = null; }
             }
+        }
+
+        /// <summary>
+        /// 窗口过程钩子：user32 把 WM_MENURBUTTONUP **发给** owner（不是投递），
+        /// 所以只有窗口过程能看到它。处理失败 / 没有订阅者 ⇒ 原样返回、handled=false。
+        /// </summary>
+        private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == (int)NativeMenu.WM_MENURBUTTONUP)
+            {
+                try
+                {
+                    var handler = MenuButtonUp;
+                    if (handler != null)
+                    {
+                        handler(lParam, wParam.ToInt32());
+                        handled = true;
+                    }
+                }
+                catch
+                {
+                    // 右键菜单失败绝不能把主菜单打掉
+                }
+            }
+            return IntPtr.Zero;
         }
 
         /// <summary>诊断用：owner 窗口当前是否可见（可见才能成为前台窗口）。</summary>
@@ -94,6 +137,11 @@ namespace RunEverCs.Native
 
         public void Dispose()
         {
+            try
+            {
+                if (_src != null) { _src.RemoveHook(WndProcHook); _src = null; }
+            }
+            catch { }
             try
             {
                 if (_w != null) _w.Close();

@@ -22,7 +22,22 @@ namespace RunEverCs
             // ============================================================
             if (args == null) args = new string[0];
 
-            string root = FindRoot(args);
+            // ★ 卡 A（2026-11-17）：`--root` 允许写在最前。
+            //   旧行为按 args[0] 分派 ⇒ `--root x --selftest-arch out` 的 args[0] 是 "--root"，
+            //   不匹配任何自检名 ⇒ 落回「正常启动」⇒ 起托盘；无人值守时直接挂住。
+            //   现在：先把成对的 `--root <x>` 从**分派视角**剥离（其余实参相对顺序不变），
+            //   再按剩下的第一个 token 分派。
+            string rootFlagValue;
+            bool rootFromFlag;
+            args = StripRootPairs(args, out rootFlagValue, out rootFromFlag);
+
+            string root = rootFromFlag ? rootFlagValue : FindRoot(args);
+
+            // 把「用过 --root」这件事还给子命令：
+            //   · 禁带 --root 的三套自检（arch / iconurl / search）只要在实参里看到令牌就按原语义
+            //     exit=2 —— 只补令牌、不补值，绝不挤歪它们的 args[1]/args[2]；
+            //   · 其余命令补完整键值对（--ev-probe / --selfcheck 自己还要读 root）。
+            if (rootFromFlag) args = WithRootHint(args, root);
 
             if (args.Length >= 1)
             {
@@ -39,6 +54,36 @@ namespace RunEverCs
                         return;
                     case "--selftest-menu":
                         Environment.ExitCode = MenuSelfTest.Run(args);
+                        return;
+                    // ★ 卡 A（2026-11-17）：配置规模预检 —— 弹菜单前就知道会不会超上限。
+                    //   口径：--check-conf <menus.conf> <out.txt>（**不收 root**，与 --selftest-menu 同形）
+                    //   退出码：有 fatal（单菜单 >1168 项）⇒ 3；只有 WARN（>900）⇒ 0；正常 ⇒ 0。
+                    case "--check-conf":
+                        Environment.ExitCode = Services.ConfCheck.Run(args);
+                        return;
+                    case "--selftest-checkconf":
+                        Environment.ExitCode = Services.ConfCheck.SelfTestRun(args);
+                        return;
+
+                    // ★ 卡 D（2026-11-17b）：菜单项右键上下文菜单 —— 常量/索引解析/TPM_RECURSE/
+                    //   三个动作落盘/边界/重建的离线自检。口径：--selftest-menurbuttonup <root> <out.txt>
+                    case "--selftest-menurbuttonup":
+                        Environment.ExitCode = MenuItemContextMenuSelfTest.Run(args);
+                        return;
+                    // ★ 卡 E（2026-11-17b）：配置层两条修饰位的自检 ——
+                    //   `off`（条目临时禁用：解析 / 灰显渲染 / 不进 IdMap / 窄写回保留）
+                    //   `class:`（proc 槽位按前台窗口类名匹配；混写组两种路径都命中）。
+                    //   口径：--selftest-conf-flags <root> <out.txt>，**禁带 --root**，离线可跑。
+                    case "--selftest-conf-flags":
+                        Environment.ExitCode = ConfFlagsSelfTest.Run(args);
+                        return;
+                    // ★ 卡 F（2026-11-17b）：执行层 evsearch + 配置覆盖层 menulocal.conf
+                    //   口径：--selftest-evsearch / --selftest-overlay <root> <out.txt>（**禁带 --root**）
+                    case "--selftest-evsearch":
+                        Environment.ExitCode = EvSearchSelfTest.Run(args);
+                        return;
+                    case "--selftest-overlay":
+                        Environment.ExitCode = OverlaySelfTest.Run(args);
                         return;
                     case "--selftest-capture":
                         Environment.ExitCode = CaptureSelfTest.Run(args);
@@ -323,6 +368,66 @@ namespace RunEverCs
 
         [System.Runtime.InteropServices.DllImport("user32.dll")]
         private static extern bool IsWindow(IntPtr hWnd);
+
+        /// <summary>
+        /// 剥离所有成对的 <c>--root &lt;x&gt;</c>，返回剩余实参（位置参数相对顺序不变）。
+        /// 只认第一个 `<c>--root</c>` 的值（与 <see cref="FindRoot"/> 的历史口径一致：取首个），
+        /// 值的规范化也照抄 FindRoot（Trim → 去字面引号 → 去尾斜杠）。
+        /// 尾随一个**没有值**的 `<c>--root</c>` 原样留下 —— FindRoot 的 `i + 1` 边界同样不认它。
+        /// </summary>
+        private static string[] StripRootPairs(string[] args, out string rootValue, out bool found)
+        {
+            rootValue = null;
+            found = false;
+
+            var rest = new System.Collections.Generic.List<string>(args.Length);
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], "--root", StringComparison.Ordinal) && i + 1 < args.Length)
+                {
+                    if (!found)
+                    {
+                        rootValue = (args[i + 1] ?? "").Trim().Trim('"').TrimEnd('\\', '/');
+                        found = true;
+                    }
+                    i++;            // 连值一起剥掉
+                    continue;
+                }
+                rest.Add(args[i]);
+            }
+            return rest.ToArray();
+        }
+
+        /// <summary>
+        /// 把「用过 --root」还原给子命令（详见 Main 里的调用处注释）：
+        /// 禁带 --root 的自检只补令牌，其余命令补完整键值对。
+        /// </summary>
+        private static string[] WithRootHint(string[] rest, string root)
+        {
+            if (rest.Length == 0) return rest;
+
+            var list = new System.Collections.Generic.List<string>(rest);
+            if (IsRootForbiddenSuite(rest[0]))
+            {
+                // 只补令牌（值不补，避免挤歪 args[1]/args[2]）；
+                // 实参不足 3 个时本来也只会 exit=2，不必再补。
+                if (list.Count >= 3) list.Add("--root");
+            }
+            else
+            {
+                list.Add("--root");
+                list.Add(root ?? "");
+            }
+            return list.ToArray();
+        }
+
+        /// <summary>这三套自检的口径是「root 由位置参数给，禁带 --root」。</summary>
+        private static bool IsRootForbiddenSuite(string cmd)
+        {
+            return cmd == "--selftest-arch"
+                || cmd == "--selftest-iconurl"
+                || cmd == "--selftest-search";
+        }
 
         /// <summary>定位 RunEver 根目录：--root 参数优先，否则从 exe 位置向上找 config。</summary>
         private static string FindRoot(string[] args)

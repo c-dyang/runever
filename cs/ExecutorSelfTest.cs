@@ -219,12 +219,20 @@ namespace RunEverCs
                 chk(keysOk && ex.LastKeys == "^c", "keys：按键序列记录（DryRun 不真发键）", ex.LastKeys);
                 ex.DryRun = false;
 
-                // ---------------- evsearch（只留分发位） ----------------
+                // ---------------- evsearch（卡 F 起已实现：只验"不静默成功"） ----------------
+                //   2026-11-17b：`evsearch` 从"只留分发位"变成真实现。原断言锁死
+                //   `evsearch-not-implemented`，已随实现作废；保留其**原意**（不得静默返回成功）：
+                //   在无有效命中 / 无后端的环境里跑一次，必须是**明确错误码**、不得算成功。
                 sb.AppendLine();
-                sb.AppendLine("--- evsearch（本段只留分发位）---");
-                chk(!ex.Execute(new Executor.Task { Type = "evsearch", Target = "%file%" })
-                    && ex.LastErrorCode == "evsearch-not-implemented",
-                    "evsearch：返回**未实现**明确错误码（不得静默返回成功）", ex.LastErrorCode);
+                sb.AppendLine("--- evsearch（已实现；只验不静默成功）---");
+                bool evOk = ex.Execute(new Executor.Task { Type = "evsearch", Target = "%file%" });
+                bool evExplicit = !evOk
+                    && (ex.LastErrorCode == "evsearch-empty-query"
+                        || ex.LastErrorCode == "evsearch-no-result"
+                        || ex.LastErrorCode == "evsearch-backend-unavailable");
+                chk(evExplicit,
+                    "evsearch：无命中/无后端时返回**明确错误码**（不得静默返回成功，也不得回落到 not-implemented）",
+                    ex.LastErrorCode);
 
                 // ---------------- 占位符逐项（唯一源 = PlaceholderExpander） ----------------
                 sb.AppendLine();

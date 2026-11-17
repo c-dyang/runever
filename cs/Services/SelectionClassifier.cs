@@ -95,6 +95,20 @@ namespace RunEverCs.Services
         public static MatchContext Build(string text, IList<string> paths, string procName,
             string clipboard, string winTitle)
         {
+            return Build(text, paths, procName, clipboard, winTitle, "");
+        }
+
+        /// <summary>
+        /// 同上，外加**前台窗口类名**（卡 E：`proc` 组的 `class:` 关键词用）。
+        ///
+        /// ★ 为什么类名在这里注入而不是判定层现取：契约 §2 判定层零 IO / 零窗口调用。
+        ///   类名本来就是采集结果里的字段（`Context.WinClass` ← 采集链 JSON 的 `winClass`），
+        ///   这一层只做"搬运"，不调用 GetClassName、不碰 AHK（AHK 侧一个字没改）。
+        /// ★ 传空串 ⇒ `class:` 关键词一律不命中（安全默认，不影响任何老配置）。
+        /// </summary>
+        public static MatchContext Build(string text, IList<string> paths, string procName,
+            string clipboard, string winTitle, string winClass)
+        {
             int fc, dc;
             var kind = Classify(paths, out fc, out dc);
             var ctx = new MatchContext
@@ -104,6 +118,7 @@ namespace RunEverCs.Services
                 Clipboard = clipboard ?? "",
                 WinTitle = winTitle ?? "",
                 ProcessName = procName ?? "",
+                WinClass = winClass ?? "",
                 FirstFilePath = FirstFilePath(paths),
                 ExtensionsLower = ExtensionsLower(paths),
                 FileCount = fc,
@@ -116,8 +131,9 @@ namespace RunEverCs.Services
         public static MatchContext FromCaptured(Context captured)
         {
             if (captured == null) return new MatchContext();
+            // ★ 卡 E：`Context.WinClass` 就是采集链给的前台窗口类名，原样搬进判定上下文。
             return Build(captured.Text, captured.Files, captured.Proc,
-                captured.Clipboard, captured.WinTitle);
+                captured.Clipboard, captured.WinTitle, captured.WinClass);
         }
     }
 }

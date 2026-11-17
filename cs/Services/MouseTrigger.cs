@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
+using RunEverCs.Native;
+
 namespace RunEverCs.Services
 {
     /// <summary>
@@ -149,6 +151,21 @@ namespace RunEverCs.Services
     public sealed class MouseTrigger : IDisposable
     {
         private const int WH_MOUSE_LL = 14;
+
+
+        /// <summary>菜单弹窗期间右键抬起 → 请主线程自己算命中项（WM_APP+84+）。</summary>
+        public const int WM_POPUP_RBUTTON = 0x8000 + 0x54;
+
+        private bool _popupRbDown;
+        private int _popupRbX;
+        private int _popupRbY;
+
+        /// <summary>最近一次"菜单弹窗期间右键"的屏幕坐标（主线程读取）。</summary>
+        public void GetPopupRightClick(out int x, out int y)
+        {
+            x = _popupRbX;
+            y = _popupRbY;
+        }
         private const int WM_MOUSEMOVE = 0x0200;
         private const int WM_RBUTTONDOWN = 0x0204;
         private const int WM_RBUTTONUP = 0x0205;
@@ -430,6 +447,34 @@ namespace RunEverCs.Services
                 var s = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
                 if (s.DwExtraInfo == ReplayMagic)
                     return CallNextHookEx(_hook, nCode, wParam, lParam);
+
+                // ★ 2026-11-17 菜单右键修复：我们自己的菜单正在显示时，右键必须**原样放行**。
+                //   否则 RBUTTONDOWN 被下面吞掉 ⇒ 菜单收不到配对事件 ⇒ Windows 不发
+                //   WM_MENURBUTTONUP ⇒ 菜单项右键上下文菜单永远不弹（真机复现过）。
+                //   放行期间**不**置定时器：菜单开着时长按右键不该再弹一个菜单。
+                if (NativeMenu.IsPopupActive)
+                {
+                    // ★ 2026-11-17：菜单弹窗期间的右键**完全由我们接管**。
+                    //   实测 WM_MENURBUTTONUP 在本机不来（诊断 0 命中），改由钩子记坐标 +
+                    //   主线程 WindowFromPoint→MN_GETHMENU→MenuItemFromPoint 自己算命中项。
+                    if (wParam.ToInt32() == WM_RBUTTONDOWN)
+                    {
+                        _popupRbDown = true;
+                        _popupRbX = s.Pt.X;
+                        _popupRbY = s.Pt.Y;
+                        return (IntPtr)1;                 // 吞：别让菜单把手势当选择/取消
+                    }
+                    if (wParam.ToInt32() == WM_RBUTTONUP && _popupRbDown)
+                    {
+                        _popupRbDown = false;
+                        _popupRbX = s.Pt.X;
+                        _popupRbY = s.Pt.Y;
+                        if (_hwnd != IntPtr.Zero)
+                            PostMessageW(_hwnd, WM_POPUP_RBUTTON, IntPtr.Zero, IntPtr.Zero);
+                        return (IntPtr)1;                 // 吞：抬起也不放给菜单
+                    }
+                    return CallNextHookEx(_hook, nCode, wParam, lParam);
+                }
 
                 int msg = wParam.ToInt32();
 

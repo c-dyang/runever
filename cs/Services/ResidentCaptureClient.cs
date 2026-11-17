@@ -30,6 +30,9 @@ namespace RunEverCs.Services
         private readonly string _ahkExe;       // 解释器（runnerPath 是 .ahk 时才用到）
         private readonly int _timeoutMs;
 
+        /// <summary>Kill 之后等进程退出的上限（ms）—— 保证"杀完不留僵尸"（卡 C）。</summary>
+        private const int KillWaitMs = 2000;
+
         private readonly object _gate = new object();
         private Process _proc;
         private IntPtr _job = IntPtr.Zero;
@@ -192,6 +195,9 @@ namespace RunEverCs.Services
                 if (!p.WaitForExit(1200)) p.Kill();
             }
             catch { try { p.Kill(); } catch { } }
+            // ★ 卡 C（2026-11-17）：Kill 之后必须等它真的退出，否则管道那头的
+            //   CaptureRunner 会在本对象已丢弃引用之后还活一小会儿（僵尸进程）。
+            try { p.WaitForExit(KillWaitMs); } catch { }
             try { p.Dispose(); } catch { }
         }
 

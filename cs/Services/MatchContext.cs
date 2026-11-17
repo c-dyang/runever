@@ -30,6 +30,7 @@ namespace RunEverCs.Services
     ///   与分类器（SelectionClassifier）先算好，以**值**的形式注入：
     ///     · FileCount / FolderCount —— 选中项分类的计数（不接收路径数组）
     ///     · ExtensionsLower         —— 已提好的小写扩展名（不含点）
+    ///     · WinClass                —— 前台窗口类名的**取值**（`class:` 关键词匹配用，卡 E）
     ///     · EntryResolved[]         —— 缺件注入位（true = 该下标条目可用）
     ///     · MissingItemIndex        —— 被判定为缺件的**全局条目下标**
     ///   这样判定层可纯函数化、可全量单测（`--selftest-matcher` 不创建任何文件）。
@@ -54,6 +55,15 @@ namespace RunEverCs.Services
 
         /// <summary>前台进程名（原样，含 .exe；%proc%）。</summary>
         public string ProcessName = "";
+
+        /// <summary>
+        /// 前台窗口**类名**（原样，例如 `CabinetWClass`）。
+        /// ★ 卡 E（2026-11-17b）：`proc` 组关键词写成 `class:类名` 时按它匹配。
+        ///   与 <see cref="ProcessName"/> 同一口径 —— **由 App 层从采集结果注入**
+        ///   （`Context.WinClass`，采集链本来就有这个字段），判定层不调用 GetClassName、零 IO。
+        /// ★ 空串 = 没有类名可用 ⇒ 所有 `class:` 关键词判不命中（绝不回退成进程名匹配）。
+        /// </summary>
+        public string WinClass = "";
 
         /// <summary>首个选中文件的全路径（%file%）。</summary>
         public string FirstFilePath = "";

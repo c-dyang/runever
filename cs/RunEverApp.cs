@@ -130,26 +130,34 @@ namespace RunEverCs
                 // 内存整理（2026-11-08）：菜单关闭后空闲若干秒把工作集还给系统
                 Services.MemTrim.AttachLog(Log);
                 Native.NativeMenu.KeyLog = Log;
-                _capture = new CaptureClient(Root);
+                _capture = new CaptureClient(Root, null, CaptureTimeoutMs);
                 // ★ 常驻采集：复用 CaptureClient 的路径解析（dist\CaptureRunner.exe 优先，
                 //   其次根目录，最后 src\CaptureRunner.ahk + 解释器）。
                 //   起进程是惰性的（第一次 WaitCapture 才起），启动不额外付进程创建时间。
-                _captureResident = new ResidentCaptureClient(_capture.RunnerPath, _capture.AhkExe);
+                _captureResident = new ResidentCaptureClient(
+                    _capture.RunnerPath, _capture.AhkExe, CaptureTimeoutMs);
                 // 图标落盘缓存（2026-11-07）：state\icons\<sha1(exe路径)>_<mtime>.png
                 Native.IconDiskCache.Init(Root);
 
-                // ★★ 并行预热采集：采集要起 AHK 进程（~250ms 主要是运行时加载），
-                //    与后面的配置解析/图标准备重叠，能省下大半等待。
+                // ★★ 启动即预热（卡 C / 2026-11-17）：托盘起来**立刻**在后台预热一次
+                //    （含常驻进程拉起），不阻塞托盘图标出现；失败只记日志。
+                //    这一趟与后面的配置解析/图标准备重叠，能省下大半等待。
                 //    实测（2026-10-03）：采集 279ms 是"菜单弹出慢"的最大头，
                 //    串行时完全暴露在用户等待里。
+                //    ⚠ 预热只在 PrewarmValidMs 内有效（选中内容必须是按键那一刻的），
+                //    过期走的是 WaitCapture 的并行探测（最坏 1500ms），不再串行等 3.3s。
                 if (_capture.IsAvailable())
                 {
                     _captureTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-                    _captureTask = System.Threading.Tasks.Task.Run(() => CaptureOnce());
+                    _captureTask = RunOnDedicatedThread(() => CaptureOnce());
+                    Log("预热采集: 已后台启动（常驻+一次性并行，不阻塞托盘）");
                 }
 
                 _parser = new ConfParser(confPath);
                 _parser.Parse();
+                // ★ 卡 F（2026-11-17b）：menulocal.conf 本机覆盖层 —— 解析之后、构建/判定之前
+                //   的**唯一合并点**。文件不存在 ⇒ 一个字段都不动（零变化）。
+                ApplyMenuOverlay(_parser);
                 Log("配置加载 OK，分组数 = " + _parser.Groups.Count);
 
                 // ★ 段 1.7：menus.conf 热加载检查点（登记启动解析的版本戳基线 ⇒ 首次热键不白解析）
@@ -186,6 +194,10 @@ namespace RunEverCs
                 //   （此前该键被读入却无消费者 = 死配置，守门 AC-6 打回项）
                 _executor.WaitWhenShown = (_autoMatcher.Conf.WaitWhenShown != 0);
 
+                // ★ 卡 F（2026-11-17b）：evsearch 的配置来源（submenulimit / espath / evdll）
+                //   走 ConfigRoot ⇒ 每次查询现读 auto.conf，改完立即生效（无需重启）。
+                _executor.ConfigRoot = Root;
+
                 Log("采集器可用 = " + _capture.IsAvailable());
 
                 // ★ 时机①（AC-5①）：开机后台扫一遍 —— **后台线程**，绝不进热键回调（I-5）。
@@ -221,6 +233,22 @@ namespace RunEverCs
         private const int PrewarmValidMs = 2000;
 
         /// <summary>
+        /// 单次采集的硬超时（ms）—— 常驻管道往返与一次性采集进程**共用**。
+        ///
+        /// ★ 卡 C（2026-11-17）：3000 → 800。一次性采集实测 284ms（日志 2026-11-17），
+        ///   3000ms 对正常路径零收益，只把故障路径拖成 3000+284≈3.3s。
+        ///   800ms = 284ms × 2.8 倍余量（留出常驻冷启动 + 磁盘抖动）。
+        /// </summary>
+        public const int CaptureTimeoutMs = 800;
+
+        /// <summary>
+        /// 并行探测的总等待上限（ms）：过了这个点就带着已有结果往下走 ——
+        /// 菜单照弹（宁可上下文为空，也不让用户觉得"按了没反应"）。
+        /// 必须 &gt; <see cref="CaptureTimeoutMs"/>：给两条腿各留跑完一轮的时间。
+        /// </summary>
+        public const int ParallelProbeBudgetMs = 1500;
+
+        /// <summary>
         /// 目录准备（幂等）+ 首次启动自举配置模板。
         ///
         /// ★ 2026-10-03 补齐（对照 AHK `RunEver.ahk:1088-1112`）：原来只建空目录，
@@ -254,6 +282,7 @@ namespace RunEverCs
                 {
                     Log("  ⚠ 预热采集已过期（" + ageMs + "ms > " + PrewarmValidMs
                         + "ms）→ 改为实时采集");
+                    Observe(task);        // 丢弃也要丢干净（异常必须被观察）
                 }
                 else
                 {
@@ -273,23 +302,155 @@ namespace RunEverCs
                 }
             }
             // ★ 2026-11-07：采集唯一入口 —— 常驻 AHK 管道优先，失败退回一次性进程。
+            // ★ 卡 C（2026-11-17）：该入口内部改成两条腿**并行**跑，见 CaptureOnce。
             return CaptureOnce();
         }
 
         /// <summary>
         /// 采一次（**唯一**采集入口，预热与实时都走这里）。
-        /// 常驻管道优先（~3ms）；常驻起不来/刚崩 ⇒ 退回一次性进程（~396ms），
-        /// 不因为常驻故障就把菜单打空。
+        ///
+        /// ★ 卡 C（2026-11-17）：并行探测。「常驻 ping」与「一次性采集」**同时**发出，
+        ///   谁先返回有效结果就用谁，另一边直接丢弃。
+        ///
+        ///   为什么改（日志实测 2026-11-17）：旧实现是**串行**的 —— 先等常驻（3000ms）
+        ///   失败才退回一次性（284ms）⇒ 最坏 3000+284≈3.3s，托盘冷启动后第一次弹菜单
+        ///   要 1.3–6.3s。并行后最坏 = <see cref="ParallelProbeBudgetMs"/>（1500ms）；
+        ///   常驻正常时仍只是一次管道往返（~3ms）。
+        ///
+        ///   降级顺序**没变**：常驻优先、一次性兜底，只是两条腿同时跑，
+        ///   不再让"常驻卡死 3 秒"把用户挡在门外。
+        ///
+        ///   「有效结果」= Context 至少一项非空。超时/断管道返回的是**全空** Context，
+        ///   那不算结果 —— 否则常驻一超时就会"先返回"把一次性采集的正确结果挤掉。
         /// </summary>
         private Context CaptureOnce()
         {
-            if (_captureResident != null && _captureResident.IsAvailable())
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+
+            bool residentOk = _captureResident != null && _captureResident.IsAvailable();
+            bool onceOk = _capture != null && _capture.IsAvailable();
+
+            if (!residentOk && !onceOk)
             {
-                var c = _captureResident.Capture(s => Log("  " + s));
-                if (_captureResident.IsRunning) return c;
-                Log("  ⚠ 常驻采集不可用 → 退回一次性采集进程");
+                Log("  并行探测: 常驻=不可用 一次性=不可用 用时=" + sw.ElapsedMilliseconds + " ms");
+                return new Context();
             }
-            return _capture.Capture(s => Log("  " + s));
+
+            // ★★ 并发点：两个 Task 都在下面等待之前发出 ——
+            //    不能写成"先等常驻，再起一次性"（那就是旧实现的串行 3.3s）。
+            var residentTask = residentOk
+                ? RunOnDedicatedThread(() => _captureResident.Capture(s => Log("  " + s)))
+                : null;
+            var onceTask = onceOk
+                ? RunOnDedicatedThread(() => _capture.Capture(s => Log("  " + s)))
+                : null;
+
+            var pending = new List<System.Threading.Tasks.Task<Context>>(2);
+            if (residentTask != null) pending.Add(residentTask);
+            if (onceTask != null) pending.Add(onceTask);
+
+            Context result = null;
+            bool budgetOut = false;
+            while (pending.Count > 0)
+            {
+                int remain = ParallelProbeBudgetMs - (int)sw.ElapsedMilliseconds;
+                if (remain <= 0) { budgetOut = true; break; }
+                int idx;
+                try { idx = System.Threading.Tasks.Task.WaitAny(pending.ToArray(), remain); }
+                catch { budgetOut = true; break; }
+                if (idx < 0) { budgetOut = true; break; }  // 到上限还没人给出结果
+                var t = pending[idx];
+                pending.RemoveAt(idx);
+                var r = SafeResult(t);
+                if (IsValidContext(r)) { result = r; break; }
+            }
+            sw.Stop();
+
+            // ★ 判据 4：这一行措辞固定（主 agent 按 `并行探测` 抽检）
+            Log("  并行探测: 常驻=" + ProbeStatus(residentTask, budgetOut)
+                + " 一次性=" + ProbeStatus(onceTask, budgetOut)
+                + " 用时=" + sw.ElapsedMilliseconds + " ms");
+
+            // 输的那一边**不等**（等就把并行的收益吃回去了）：它自带 CaptureTimeoutMs 硬超时，
+            // 到点自己 Kill 并**等待进程退出** ⇒ 任何路径都不留僵尸 CaptureRunner。
+            // 这里只保证异常被观察，别让 Task 的 AggregateException 变成未观察异常。
+            Observe(residentTask);
+            Observe(onceTask);
+
+            return result ?? new Context();
+        }
+
+        /// <summary>
+        /// 起一个**独占线程**跑采集。
+        ///
+        /// 为什么不用裸 `Task.Run`：采集是同步阻塞的（最长 CaptureTimeoutMs），
+        /// 而线程池发现任务阻塞后新开线程很慢（实测 ~0.5–1s 才注入一个）⇒
+        /// 两条腿会互相排队，"并行"退化成串行。2026-11-17 离线实测（常驻故意卡 2s）：
+        /// 一次性 123ms 就返回了，探测却要 **982ms** 才收 —— 就是被线程池饿的。
+        /// LongRunning 让调度器直接给一条独立线程，代价可忽略（每次探测两条短命线程）。
+        /// </summary>
+        private static System.Threading.Tasks.Task<Context> RunOnDedicatedThread(Func<Context> body)
+        {
+            return System.Threading.Tasks.Task.Factory.StartNew(
+                body,
+                System.Threading.CancellationToken.None,
+                System.Threading.Tasks.TaskCreationOptions.LongRunning,
+                System.Threading.Tasks.TaskScheduler.Default);
+        }
+
+        /// <summary>采集结果是否"有效"（至少一项非空）。全空 = 超时/断管道，不能当结果用。</summary>
+        private static bool IsValidContext(Context c)
+        {
+            if (c == null) return false;
+            return !string.IsNullOrEmpty(c.Text)
+                || !string.IsNullOrEmpty(c.WinTitle)
+                || !string.IsNullOrEmpty(c.Proc)
+                || (c.Files != null && c.Files.Count > 0)
+                || !string.IsNullOrEmpty(c.Clipboard);
+        }
+
+        /// <summary>取任务结果；未完成 / 抛异常 ⇒ null（绝不把异常抛给热键链）。</summary>
+        private static Context SafeResult(System.Threading.Tasks.Task<Context> t)
+        {
+            if (t == null) return null;
+            try
+            {
+                if (!t.IsCompleted || t.IsFaulted || t.IsCanceled) return null;
+                return t.Result;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>
+        /// 探测状态词（只用于日志）。词汇与判据 4 对齐：OK / 超时。
+        ///   · OK     —— 已返回且是有效结果
+        ///   · 超时   —— 到并行探测上限还没返回
+        ///   · 未返回 —— 另一边先赢了，本方法不再等它（它自己会在 CaptureTimeoutMs 内收尾）
+        ///   · 失败   —— 已返回但结果全空（超时/断管道）
+        /// </summary>
+        private static string ProbeStatus(System.Threading.Tasks.Task<Context> t, bool budgetOut)
+        {
+            if (t == null) return "不可用";
+            if (!t.IsCompleted) return budgetOut ? "超时" : "未返回";
+            return IsValidContext(SafeResult(t)) ? "OK" : "失败";
+        }
+
+        /// <summary>把 Task 的异常标记为已观察（丢结果也要丢干净）。</summary>
+        private static void Observe(System.Threading.Tasks.Task<Context> t)
+        {
+            if (t == null) return;
+            if (t.IsCompleted)
+            {
+                try { var ignored = t.Exception; } catch { }
+                return;
+            }
+            try
+            {
+                t.ContinueWith(x => { var ignored = x.Exception; },
+                    System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted
+                    | System.Threading.Tasks.TaskContinuationOptions.ExecuteSynchronously);
+            }
+            catch { }
         }
 
         // ============================================================
@@ -335,6 +496,7 @@ namespace RunEverCs
                     ConfParser fresh;
                     if (_menuWatcher.TryReloadIfChanged(out fresh))
                     {
+                        ApplyMenuOverlay(fresh);  // ★ 卡 F：新实例同样要叠覆盖层（否则热加载会"丢掉"本机增量）
                         _parser = fresh;          // ★ 只能整体替换（禁止部分替换 / 就地改 Groups）
                         Log("menus.conf 热加载: 分组数=" + fresh.Groups.Count
                             + "（全新实例，旧实例交 GC；下次判定即用新表）");
@@ -346,6 +508,10 @@ namespace RunEverCs
                     Log("menus.conf 热加载检查异常（沿用旧表）: " + ex.Message);
                 }
             }
+
+            // ---- ①b menulocal.conf（本机覆盖层）：变了就重读（1 次 stat，未变 0 读盘）----
+            try { OverlayHotReloadCheck(); }
+            catch (Exception ex) { Log("menulocal.conf 热加载检查异常（沿用旧表）: " + ex.Message); }
 
             // ---- ② auto.conf：一次 stat 取显示类开关快照 ----
             _liveHideMissing = false;
@@ -378,6 +544,7 @@ namespace RunEverCs
             {
                 var p = new ConfParser(Path.Combine(Root, "config", "menus.conf"));
                 p.Parse();
+                ApplyMenuOverlay(p);                          // ★ 卡 F：覆盖层只在这一处叠加
                 _parser = p;                                  // ★ 整体换代
                 if (_menuWatcher != null) _menuWatcher.AcceptBaseline(p);
                 Log("配置重读 OK，分组数 = " + p.Groups.Count);
@@ -387,6 +554,90 @@ namespace RunEverCs
             {
                 Log("配置重读失败（保留旧分组表）: " + ex.Message);
                 return false;
+            }
+        }
+
+        // ============================================================
+        // ★ 卡 F（2026-11-17b）：menulocal.conf 本机覆盖层
+        //
+        // 唯一合并点（解析之后、构建/判定之前）。调用点只允许三处：
+        //   Init（启动解析后）/ ReloadMenus（显式重读）/ HotReloadCheck（watcher 换代后）。
+        //
+        // ★ 为什么不在 ConfParser.Parse() 里做：MenuConfWriter 保存时以
+        //   `new ConfParser(menus.conf)` 作"磁盘现状"。若 Parse 掺进覆盖层，编辑器保存
+        //   就会把覆盖层条目写进基文件 —— 违反"覆盖层只读"的硬约束（见 MenuLocalOverlay 文件头）。
+        //
+        // ★ 幂等：`ConfParser.OverlayApplied` 护栏 + 覆盖层文件戳（见 HotReloadCheck）。
+        // ============================================================
+        private OverlayResult ApplyMenuOverlay(ConfParser parser)
+        {
+            if (parser == null) return null;
+            OverlayResult r = null;
+            try
+            {
+                string confPath = Path.Combine(Root, "config", "menus.conf");
+                r = MenuLocalOverlay.Apply(parser, confPath, s => Log("  " + s));
+                if (r.Present)
+                    Log("menulocal.conf 覆盖层: " + r.Describe());
+                _overlayTicks = OverlayStampTicks();
+                _overlayLen = OverlayStampLen();
+            }
+            catch (Exception ex)
+            {
+                // 覆盖层出任何事都不能影响基配置（绝不因为"本机增量"炸掉热键）
+                Log("menulocal.conf 覆盖层异常（按基配置继续）: " + ex.Message);
+            }
+            return r;
+        }
+
+        /// <summary>menulocal.conf 的文件戳（不存在 ⇒ -1）。热键期只做 stat，不读盘。</summary>
+        private long _overlayTicks = -1;
+        private long _overlayLen = -1;
+
+        private string OverlayConfPath
+        {
+            get { return MenuLocalOverlay.OverlayPathFor(Path.Combine(Root, "config", "menus.conf")); }
+        }
+
+        private long OverlayStampTicks()
+        {
+            try
+            {
+                string p = OverlayConfPath;
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return -1;
+                return new FileInfo(p).LastWriteTimeUtc.Ticks;
+            }
+            catch { return -1; }
+        }
+
+        private long OverlayStampLen()
+        {
+            try
+            {
+                string p = OverlayConfPath;
+                if (string.IsNullOrEmpty(p) || !File.Exists(p)) return -1;
+                return new FileInfo(p).Length;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>
+        /// 覆盖层变了才整份重读（走 <see cref="ReloadMenus"/> 这条显式通道）。
+        /// 成本 = 1 次 stat（未变 ⇒ 0 读盘 / 0 解析）。
+        /// </summary>
+        private void OverlayHotReloadCheck()
+        {
+            long t = OverlayStampTicks();
+            long n = OverlayStampLen();
+            if (t == _overlayTicks && n == _overlayLen) return;
+
+            Log("menulocal.conf 变更（戳 " + _overlayTicks + "/" + _overlayLen
+                + " → " + t + "/" + n + "）⇒ 重读基配置 + 覆盖层");
+            if (!ReloadMenus())
+            {
+                // 重读失败：保留旧表，同时把戳退回旧值，下一次热键还会再试
+                _overlayTicks = -1;
+                _overlayLen = -1;
             }
         }
 
@@ -529,6 +780,7 @@ namespace RunEverCs
             //   自检一直走 `Build(groups, live)` 传了 conf 才全绿，把这条真机接线漏了。
             //   Conf 由 AutoMatcher.Load → ReadConf 在每次热键流程刷新（与 AHK 同构）。
             var built = MenuBuilder.Build(groups, _autoMatcher != null ? _autoMatcher.Conf : null);
+
             Log("菜单渲染: 顶层项数=" + built.Menu.Count()
                 + " 可点条目=" + built.ItemCount
                 + " 图标命中=" + built.IconHit + " 兜底=" + built.IconFallback
@@ -606,6 +858,22 @@ namespace RunEverCs
                     + " 渲染=" + (tBuild - tIcon)
                     + " owner=" + (tOwner - tBuild)
                     + " | 菜单弹出前累计=" + tOwner);
+
+                // ★ 卡 D（2026-11-17b）接线：菜单项右键上下文菜单（编辑 / 删除 / 重命名 单个条目）。
+                //   · Attach 只在**本次弹出期间**生效（TrackPopupMenuEx 返回即摘钩子），不常驻、不钩全局；
+                //   · 编辑/重命名的输入框在菜单关闭后（PopupClosed）才开 ⇒ 不会卡菜单消息泵；
+                //   · 挂载失败只记日志，主菜单不受影响。
+                try
+                {
+                    RunEverCs.Services.MenuItemContextMenu.Attach(
+                        built.Menu, built.IdMap,
+                        Path.Combine(Root, "config", "menus.conf"),
+                        Log, RunEverCs.Views.QuickInput.Prompt);
+                }
+                catch (Exception ex)
+                {
+                    Log("⚠ 右键上下文菜单挂载失败（不影响主菜单）: " + ex.Message);
+                }
 
                 RunEverCs.Services.MemTrim.MarkBusy();
                 selId = built.Menu.ShowAtCursor(owner.Handle);
@@ -1401,6 +1669,7 @@ namespace RunEverCs
                 }
 
                 sb.AppendLine("[OK]   采集器    " + (_capture.IsAvailable() ? "可用" : "缺失"));
+                sb.AppendLine(SelfTestCaptureTimeoutPolicy());
                 sb.AppendLine(SelfTestCaptureFreshness());
                 sb.AppendLine(SelfTestAutoExec());     // ★ 自动执行（匹配块）段
                 sb.AppendLine("=== SELFTEST 通过 ===");
@@ -1430,6 +1699,21 @@ namespace RunEverCs
                     return _captureResident.CaptureCount + (_capture == null ? 0 : _capture.CaptureCount);
                 return _capture == null ? 0 : _capture.CaptureCount;
             }
+        }
+
+        /// <summary>
+        /// 卡 C 判据 2：两个超时常量必须**可枚举**（800 / 1500）。
+        /// 只断言常量取值与大小关系，不测真实耗时 —— 离线自检没有采集器，测不出端到端时延
+        /// （实测数字见本批 SUMMARY：需真机）。
+        /// </summary>
+        private static string SelfTestCaptureTimeoutPolicy()
+        {
+            bool ok = CaptureTimeoutMs == 800
+                      && ParallelProbeBudgetMs == 1500
+                      && ParallelProbeBudgetMs > CaptureTimeoutMs;
+            return (ok ? "[OK]   " : "[FAIL] ") + "采集超时常量  CaptureTimeoutMs="
+                + CaptureTimeoutMs + "ms  ParallelProbeBudgetMs=" + ParallelProbeBudgetMs
+                + "ms（上限 > 单次超时 ⇒ 两条腿各跑得完一轮）";
         }
 
         private string SelfTestCaptureFreshness()

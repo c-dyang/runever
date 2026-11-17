@@ -26,6 +26,20 @@ namespace RunEverCs.Services
             public int IconFallback;
 
             /// <summary>
+            /// 本次构建里 `off`（临时禁用）条目数 —— **不在 <see cref="IdMap"/> 里**、不计入
+            /// <see cref="ItemCount"/>（ItemCount 的口径仍是"可点条目"，与 IdMap 一一对应）。
+            /// 供自检 / 日志区分"看不到"与"看得到但点不动"。
+            /// </summary>
+            public int GrayedCount;
+
+            /// <summary>
+            /// 降级重建说明（空 = 本次没有截断，正常构建）。
+            /// ★ 文本含 <c>已截断 N 项（原 M 项）</c>，与 <see cref="MenuBuilder.LastTruncationNote"/>
+            ///   同一份 —— 托盘 / 自检 / 日志共用一条证据，不各写各的。
+            /// </summary>
+            public string TruncationNote = "";
+
+            /// <summary>
             /// 固定项「全库搜索」的命令 ID（0 = 本次没有追加）。
             /// ★ 它**不在** <see cref="IdMap"/> 里 —— 派发方必须先判这个字段，再查 IdMap
             ///   （见 RunEverApp.ShowMenuFlow 的 MenuPick 分流）。
@@ -199,18 +213,110 @@ namespace RunEverCs.Services
             return Build(groups, null);
         }
 
+        // ============================================================
+        // ★ 卡 A（2026-11-17）：构建失败 ⇒ 降级重建（别整盘放弃）
+        //
+        // 现场：单菜单超过 1168 项（本机实测 Win32 硬上限）时 AppendMenuW 返回 FALSE ⇒
+        //   NativeMenu.AddItem 抛 InvalidOperationException ⇒ 整棵菜单构建中断 ⇒ 一个都不弹。
+        // 定案（本批 HANDOFF 决策表）：
+        //   · 捕获构建期异常后按「**每个菜单各自**截断到 N 项」重建（不是砍掉后半张配置）；
+        //   · N 从 1000 起、失败减半（500/250/125/62），最多 5 轮，取第一个成功的；
+        //   · 成功即返回可用 BuildResult（**不抛**），写日志「已截断 N 项（原 M 项）」；
+        //   · 5 轮全失败才向上抛 —— 那时确实不是"项数太多"能解释的问题。
+        // ============================================================
+
+        /// <summary>降级重建的起始单菜单项数上限（实测硬上限 1168，留余量）。</summary>
+        public const int DegradeFirstLimit = 1000;
+
+        /// <summary>降级重建最多尝试轮数（1000 / 500 / 250 / 125 / 62）。</summary>
+        public const int DegradeMaxRounds = 5;
+
+        /// <summary>
+        /// 降级日志出口（托盘可注入主日志）。未注入 ⇒ 追加到**已存在**的
+        /// <c>&lt;root&gt;\state\runever-cs.log</c>（找得到 root 且文件已存在时；不主动创建文件）。
+        /// </summary>
+        public static Action<string> LogSink;
+
+        /// <summary>最近一次构建的降级说明（空 = 没降级）。自检 / 日志共用同一份文本。</summary>
+        public static string LastTruncationNote = "";
+
         /// <summary>
         /// 构建菜单。<paramref name="conf"/> = auto.conf 的内存快照（AutoMatcher.Conf）。
         /// ★ 只有 <c>SubmenuEnabled=1</c> 才展开 `open sub`；其余键（limit/order/recursive/depth）
         ///   全来自这一份快照 —— 与 AutoMatcher 的解析同源，不在这里重读文件。
+        /// ★ 构建期异常 ⇒ 按「每个菜单各自截断」降级重建，见本段开头说明。
         /// </summary>
         public static BuildResult Build(List<MenuGroup> groups, AutoConf conf)
         {
+            LastTruncationNote = "";
+            var owned = new List<NativeMenu>();     // 每次尝试的根菜单（失败时当场销毁，不留半成品句柄）
+
+            try
+            {
+                return BuildCore(groups, conf, 0, owned);
+            }
+            catch (Exception first)
+            {
+                DisposeAll(owned);
+
+                int original = CountEffectiveEntries(groups);
+                int limit = DegradeFirstLimit;
+                Exception last = first;
+
+                for (int round = 1; round <= DegradeMaxRounds && limit >= 1; round++)
+                {
+                    try
+                    {
+                        var built = BuildCore(groups, conf, limit, owned);
+                        string note = "菜单构建失败（" + first.GetType().Name + ": " + first.Message
+                            + "）⇒ 已截断 " + built.ItemCount + " 项（原 " + original
+                            + " 项；单菜单上限=" + limit + "，第 " + round + " 轮）";
+                        built.TruncationNote = note;
+                        LastTruncationNote = note;
+                        EmitLog(note);
+                        return built;
+                    }
+                    catch (Exception ex)
+                    {
+                        last = ex;
+                        DisposeAll(owned);
+                        limit /= 2;
+                    }
+                }
+
+                EmitLog("菜单构建降级 " + DegradeMaxRounds + " 轮仍失败（最后异常: "
+                    + last.GetType().Name + ": " + last.Message + "）");
+                throw last;
+            }
+        }
+
+        /// <summary>销毁本轮尝试留下的根菜单（Dispose 幂等：已销毁的 Handle 已是 Zero）。</summary>
+        private static void DisposeAll(List<NativeMenu> menus)
+        {
+            if (menus == null) return;
+            foreach (var m in menus)
+            {
+                try { if (m != null) m.Dispose(); } catch { }
+            }
+            menus.Clear();
+        }
+
+        /// <summary>
+        /// 一次真实构建。<paramref name="perMenuLimit"/> &gt; 0 ⇒ 每个菜单各自最多这么多**有效项**
+        /// （含 root；分隔线不占额度；一个子菜单项占父菜单 1 个额度）。0 = 不限（正常路径，行为不变）。
+        /// </summary>
+        private static BuildResult BuildCore(List<MenuGroup> groups, AutoConf conf, int perMenuLimit,
+            List<NativeMenu> ownedRoots)
+        {
+            if (groups == null) groups = new List<MenuGroup>();
+
             var swAll = System.Diagnostics.Stopwatch.StartNew();
             long iconMs = 0;
             var root = new NativeMenu();
+            if (ownedRoots != null) ownedRoots.Add(root);
             var idmap = new Dictionary<int, MenuItem>();
-            int total = 0, iconHit = 0, iconFallback = 0;
+            int total = 0, iconHit = 0, iconFallback = 0, grayed = 0;
+            var counts = new Dictionary<IntPtr, int>();   // 每个菜单当前项数（键 = HMENU）
 
             LastPrunedSubtrees = 0;
             LastPrunedTitles = new List<string>();
@@ -228,14 +334,14 @@ namespace RunEverCs.Services
 
             foreach (var g in groups)
             {
-                if (g.Items.Count == 0) continue;
+                if (g == null || g.Items == null || g.Items.Count == 0) continue;
 
                 // ★ 渲染护栏：子树里没有任何可点条目 ⇒ 连子菜单都不建（永不生成 0 项子菜单）
                 var emptyShells = FindEmptyShells(g.Items);
                 if (emptyShells.Count >= g.Items.Count) continue;    // 整组都是空壳 ⇒ 不占一行/一条分隔线
 
-                // 组间分隔线（第一组不加）
-                if (!firstGroup) root.AddSeparator();
+                // 组间分隔线（第一组不加）；分隔线不占有效项额度，但菜单已满时也不再补
+                if (!firstGroup && HasRoom(counts, root, perMenuLimit)) root.AddSeparator();
                 firstGroup = false;
 
                 // 层级栈：stack[depth] = 该深度对应的菜单
@@ -248,12 +354,8 @@ namespace RunEverCs.Services
                     if (it == null || emptyShells.Contains(it)) continue;
                     int lv = it.Level;
 
-                    // 从 prevLevel 走到 lv：上读时弹栈
-                    while (stack.Count > lv)
-                        stack.RemoveAt(stack.Count - 1);
-                    // 补栈：配置跳级时用栈顶补齐
-                    while (stack.Count < lv)
-                        stack.Add(stack[stack.Count - 1]);
+                    // 从 prevLevel 走到 lv：上读时弹栈；跳级时用栈顶补齐（★ 与 CountPerMenu 同一份算术）
+                    SyncStackDepth(stack, lv);
 
                     var target = stack[stack.Count - 1];
 
@@ -263,12 +365,15 @@ namespace RunEverCs.Services
                     //   · 不改变 stack，因此它不打断父子连续性（层级不变式不受影响）。
                     if (it.IsSeparator)
                     {
-                        if (target.Count() > 0) target.AddSeparator();
+                        if (target.Count() > 0 && HasRoom(counts, target, perMenuLimit)) target.AddSeparator();
                         continue;
                     }
 
                     if (it.IsGroupHeader)
                     {
+                        // 本菜单已满 ⇒ 本条连同其整棵子树一起跳过（子项也只会落在这个菜单里）
+                        if (!TryAddRow(counts, target, perMenuLimit)) continue;
+
                         // 分组标题 → 建真子菜单
                         var sub = new NativeMenu();
                         int subIdx = target.AddSubMenu(FormatMenuText(it.Title, it.Hotkey, true), sub);
@@ -286,14 +391,16 @@ namespace RunEverCs.Services
                     }
                     else
                     {
+                        // 本菜单已满 ⇒ 跳过本条（占位规则同上：一个叶条目 / 一个目录子菜单项都算 1 行）
+                        if (!TryAddRow(counts, target, perMenuLimit)) continue;
+
                         // ★ U-B：`open sub <目录>` —— 目录可枚举就当场建子菜单，否则落到下面的普通叶分支
-                        //   ★ 2026-11-10：语义拆成两层 ——
-                        //     · 显式 sub（条目编辑页「以子菜单展示」勾选 / menus.conf 写 open sub）
-                        //       ⇒ **总是**尝试展开，不受全局闸门限制（用户明确要这个条目展开）；
-                        //     · 非显式 sub 的普通 open 目录条目 ⇒ 只有全局闸门
-                        //       「文件夹条目展开为子菜单」打开时才自动展开。
-                        if (it.Type == ActionType.Open && conf != null
-                            && (it.Sub || (conf.SubmenuEnabled == 1 && IsDirectoryTarget(it))))
+                        //   ★ 2026-11-17 定案：**取消全局闸门**（原 `submenuEnabled` 总开关）。
+                        //     只有显式 sub（条目编辑页「以子菜单展示」勾选 / menus.conf 写 `open sub`）才展开；
+                        //     普通 `open <目录>` 条目**永不**自动展开，一律当普通叶（避免大目录把菜单撑爆）。
+                        //     旧键 `submenuEnabled` 仍可读（兼容旧配置），但不再参与任何判定。
+                        //   ★ 卡 E：带 `off` 的条目不展开子菜单（灰显的父项点不开），直接按灰显叶条目渲染。
+                        if (it.Type == ActionType.Open && conf != null && it.Sub && !it.Off)
                         {
                             var sr = TryBuildDirectoryMenu(it.Target, conf, 1, idmap);
                             if (sr != null)
@@ -325,9 +432,23 @@ namespace RunEverCs.Services
                         // 叶条目
                         string text = FormatMenuText(it.Title, it.Hotkey, false);
 
-                        int id = target.AddItem(text);
-                        idmap[id] = it;
-                        total++;
+                        // ★ 卡 E（2026-11-17b）：`off` ⇒ **照常出现在菜单但灰显**、点了不执行。
+                        //   · 用既有的 `AddItemDisabled`（MF_GRAYED：禁用 + 变灰，一条 flag 就够）；
+                        //   · **不进 idmap** ⇒ 派发方查不到这个 ID ⇒ 就算点到也什么都不做；
+                        //   · 不计入 ItemCount（它不可点），另计 GrayedCount（自检/日志要能分开数）；
+                        //   · 与 `hideMissing`（缺件隐藏）正交：那个是"看不到"，这个是"看得到点不动"。
+                        int id;
+                        if (it.Off)
+                        {
+                            id = target.AddItemDisabled(text);
+                            grayed++;
+                        }
+                        else
+                        {
+                            id = target.AddItem(text);
+                            idmap[id] = it;
+                            total++;
+                        }
 
                         // 图标
                         long tIcon0 = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -367,9 +488,113 @@ namespace RunEverCs.Services
                 Menu = root,
                 IdMap = idmap,
                 ItemCount = total,
+                GrayedCount = grayed,
                 IconHit = iconHit,
                 IconFallback = iconFallback
             };
+        }
+
+        /// <summary>
+        /// 层级栈算术（**Build 与 --check-conf 共用这一份**）：把栈调整到 <paramref name="level"/> 深。
+        /// 上读弹栈、跳级用栈顶补齐 —— 与 ConfParser.NormalizeStructure / SubtreePruner 同款口径。
+        ///
+        /// ★ 2026-11-17（卡 A）：弹栈**保底留 root**（stack[0] 恒是根菜单）。
+        ///   原写法 `while (Count &gt; level)` 遇到 `Level=0` 的条目会把 root 也弹掉 ⇒
+        ///   `stack[-1]` 抛 ArgumentOutOfRangeException ⇒ 整棵菜单崩（手写配置"顶格条目"必中）。
+        ///   对 `level &gt;= 1` 的输入，两种写法**完全等价**（`Count &gt; level` ⇒ `Count &gt; 1`），
+        ///   所以现役配置 / 设置页产物 / 全部既有自检的行为一个字没变。
+        /// </summary>
+        internal static void SyncStackDepth<T>(List<T> stack, int level)
+        {
+            if (stack == null || stack.Count == 0) return;
+            while (stack.Count > 1 && stack.Count > level)
+                stack.RemoveAt(stack.Count - 1);
+            while (stack.Count < level)
+                stack.Add(stack[stack.Count - 1]);
+        }
+
+        /// <summary>该菜单是否还有额度（分隔线用：只看不占）。limit &lt;= 0 ⇒ 不限流，恒 true。</summary>
+        private static bool HasRoom(Dictionary<IntPtr, int> counts, NativeMenu menu, int perMenuLimit)
+        {
+            if (perMenuLimit <= 0) return true;
+            int c;
+            counts.TryGetValue(menu.Handle, out c);
+            return c < perMenuLimit;
+        }
+
+        /// <summary>占一行额度（有效项用）。返回 false = 该菜单已满，本行应跳过。</summary>
+        private static bool TryAddRow(Dictionary<IntPtr, int> counts, NativeMenu menu, int perMenuLimit)
+        {
+            if (perMenuLimit <= 0) return true;
+            int c;
+            counts.TryGetValue(menu.Handle, out c);
+            if (c >= perMenuLimit) return false;
+            counts[menu.Handle] = c + 1;
+            return true;
+        }
+
+        /// <summary>
+        /// 配置里「本该渲染成可点行 / 子菜单行的条目」总数（不含分隔线、不含空壳子树）——
+        /// 降级日志里的「原 M 项」。与 Build 的跳过口径一致，但不展开 `open sub` 目录。
+        /// </summary>
+        private static int CountEffectiveEntries(List<MenuGroup> groups)
+        {
+            if (groups == null) return 0;
+            int n = 0;
+            foreach (var g in groups)
+            {
+                if (g == null || g.Items == null || g.Items.Count == 0) continue;
+                var emptyShells = FindEmptyShells(g.Items);
+                if (emptyShells.Count >= g.Items.Count) continue;
+                foreach (var it in g.Items)
+                    if (it != null && !it.IsSeparator && !emptyShells.Contains(it)) n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// 降级日志出口：注入了 <see cref="LogSink"/> 就走调用方；否则追加到**已存在**的
+        /// <c>&lt;root&gt;\state\runever-cs.log</c>（与托盘的 runever-cs.log 同一份）。
+        /// 不主动创建文件 —— 自检临时目录 / 只读引用零副作用；任何写失败都不影响构建。
+        /// </summary>
+        private static void EmitLog(string line)
+        {
+            if (LogSink != null)
+            {
+                try { LogSink(line); } catch { }
+                return;
+            }
+
+            try
+            {
+                string root = GuessRootDir();
+                if (string.IsNullOrEmpty(root)) return;
+                string log = Path.Combine(root, "state", "runever-cs.log");
+                if (!File.Exists(log)) return;    // 不创建：没有日志就没有输出
+                File.AppendAllText(log,
+                    DateTime.Now.ToString("HH:mm:ss") + " [menu] " + line + Environment.NewLine,
+                    new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        /// <summary>从 exe 目录向上找含 <c>config\menus.conf</c> 的根本（与 Program.FindRoot 同口径，5 层）。</summary>
+        private static string GuessRootDir()
+        {
+            string dir = AppDomain.CurrentDomain.BaseDirectory;
+            for (int i = 0; i < 5 && !string.IsNullOrEmpty(dir); i++)
+            {
+                try
+                {
+                    if (File.Exists(Path.Combine(dir, "config", "menus.conf"))) return dir;
+                }
+                catch { return null; }
+
+                string parent = Path.GetDirectoryName(dir.TrimEnd('\\', '/'));
+                if (string.IsNullOrEmpty(parent) || parent == dir) break;
+                dir = parent;
+            }
+            return null;
         }
 
         /// <summary>open 条目的目标是不是可枚举目录（无模板占位符 + 目录存在）。</summary>
@@ -725,6 +950,7 @@ namespace RunEverCs.Services
             {
                 sb.AppendLine("顶层项数 = " + r.Menu.Count());
                 sb.AppendLine("可点条目 = " + r.ItemCount);
+                sb.AppendLine("灰显条目（off） = " + r.GrayedCount);
                 sb.AppendLine("图标: 命中=" + r.IconHit + " 兜底=" + r.IconFallback);
 
                 // ---- 断言 0：命令 ID 全局唯一（★ 关键回归断言）----
@@ -801,6 +1027,605 @@ namespace RunEverCs.Services
                 r.Menu.Dispose();
             }
             return sb.ToString();
+        }
+
+        // ============================================================
+        // ★ 卡 A（2026-11-17）：--check-conf 的计数内核
+        // ============================================================
+
+        /// <summary>一个菜单的项数（<see cref="Path"/> = 从 root 起的容器路径，便于点名）。</summary>
+        public sealed class MenuCount
+        {
+            public string Path;
+            public int Items;
+        }
+
+        /// <summary>
+        /// 按 menus.conf 结构数「每个菜单各自多少项」（**不建任何 Win32 句柄**）。
+        ///
+        /// 与 BuildCore 同一套语义（不是另写一套近似逻辑）：
+        ///   · 空分组 / 整组都是空壳 ⇒ 跳过；
+        ///   · `Level` 的父子关系走**同一份** <see cref="SyncStackDepth"/>（上读弹栈、跳级补栈）；
+        ///   · 子菜单标题在父菜单里占 1 行，同时自己另起一个菜单计数（容器换栈顶）；
+        ///   · `---` 与组间分隔线**不占有效项**。
+        /// ★ 不展开 `open sub` 目录（那要看磁盘与 auto.conf；目录内容另有 submenuLimit 兜底）——
+        ///   预检要抓的是"配置本身写得太大"，与 App 走哪台机器无关。
+        /// </summary>
+        public static List<MenuCount> CountPerMenu(List<MenuGroup> groups)
+        {
+            var rootNode = new MenuCount { Path = "（顶层 root）" };
+            var all = new List<MenuCount> { rootNode };
+            if (groups == null) return all;
+
+            foreach (var g in groups)
+            {
+                if (g == null || g.Items == null || g.Items.Count == 0) continue;
+
+                var emptyShells = FindEmptyShells(g.Items);
+                if (emptyShells.Count >= g.Items.Count) continue;
+
+                var stack = new List<MenuCount> { rootNode };
+
+                foreach (var it in g.Items)
+                {
+                    if (it == null || emptyShells.Contains(it)) continue;
+
+                    SyncStackDepth(stack, it.Level);
+                    var target = stack[stack.Count - 1];
+                    if (target == null) continue;
+
+                    if (it.IsSeparator) continue;    // 分隔线不占有效项
+
+                    if (it.IsGroupHeader)
+                    {
+                        target.Items++;              // 容器在父菜单里占 1 行
+                        var node = new MenuCount
+                        {
+                            Path = UniquePath(all, target.Path + " / " + (it.Title ?? ""))
+                        };
+                        all.Add(node);
+                        stack.Add(node);             // 容器换栈顶：更深的条目归它
+                    }
+                    else
+                    {
+                        target.Items++;
+                    }
+                }
+            }
+            return all;
+        }
+
+        /// <summary>同级重名容器加 `#2/#3` 后缀 —— 两个同名子菜单本来就是两个菜单，不能合并计数。</summary>
+        private static string UniquePath(List<MenuCount> all, string path)
+        {
+            if (FindPath(all, path) == null) return path;
+            for (int n = 2; ; n++)
+            {
+                string p = path + " #" + n;
+                if (FindPath(all, p) == null) return p;
+            }
+        }
+
+        private static MenuCount FindPath(List<MenuCount> all, string path)
+        {
+            foreach (var m in all) if (m.Path == path) return m;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// `--check-conf`：menus.conf 规模预检 —— 弹菜单**之前**就报"哪个菜单多少项 / 会不会炸"。
+    ///
+    /// 判据（本批 HANDOFF 决策表）：单菜单 &gt;900 项 ⇒ WARN；&gt;1168 项 ⇒ fatal。
+    /// 计数口径与 <see cref="MenuBuilder.Build"/> **同一套分栈语义**（见 MenuBuilder.CountPerMenu）：
+    /// 空壳子树跳过、分隔符不占有效项、容器换栈顶。
+    ///
+    /// 用法：
+    ///   RunEverCs.exe --check-conf &lt;menus.conf&gt; &lt;out.txt&gt;        （**不收 root**，与 --selftest-menu 同形）
+    ///   RunEverCs.exe --selftest-checkconf &lt;root|menus.conf&gt; &lt;out.txt&gt;
+    ///
+    /// 退出码：有 fatal ⇒ 3；只有 WARN ⇒ 0（报告里标明）；全正常 ⇒ 0；参数/文件/解析失败 ⇒ 2。
+    /// </summary>
+    public static class ConfCheck
+    {
+        /// <summary>告警阈值（单菜单项数）。</summary>
+        public const int WarnThreshold = 900;
+
+        /// <summary>fatal 阈值（单菜单项数，本机实测 Win32 菜单硬上限 1168）。</summary>
+        public const int FatalThreshold = 1168;
+
+        private const int TopN = 20;
+
+        public static int Run(string[] args)
+        {
+            if (args == null || args.Length < 3) return 2;
+
+            string report;
+            int rc = Evaluate(args[1], out report);
+            WriteText(args[2], report);
+            return rc;
+        }
+
+        /// <summary>
+        /// 预检核心（CLI 与自检共用）：返回 3 = 有 fatal / 0 = 正常或仅 WARN / 2 = 无法预检。
+        /// 报告文本经 <paramref name="report"/> 返回（WinExe 无 stdout，一律写文件）。
+        /// </summary>
+        public static int Evaluate(string confOrRoot, out string report)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("=== menus.conf 规模预检（--check-conf）===");
+
+            string confPath = confOrRoot;
+            try
+            {
+                if (Directory.Exists(confPath))
+                    confPath = Path.Combine(confPath, "config", "menus.conf");
+
+                if (!File.Exists(confPath))
+                {
+                    sb.AppendLine("  参数错误：配置文件不存在 → " + confPath);
+                    sb.AppendLine("  用法：RunEverCs.exe --check-conf <menus.conf> <out.txt>（不收 root）");
+                    sb.AppendLine("结果: 无法预检 ✗（exit=2）");
+                    report = sb.ToString();
+                    return 2;
+                }
+
+                var p = new ConfParser(confPath);
+                p.Parse();
+
+                var menus = MenuBuilder.CountPerMenu(p.Groups);
+
+                int rowCount = 0;
+                foreach (var g in p.Groups)
+                {
+                    if (g == null || g.Items == null) continue;
+                    foreach (var it in g.Items)
+                        if (it != null && !it.IsSeparator) rowCount++;
+                }
+
+                var fatal = new List<MenuBuilder.MenuCount>();
+                var warn = new List<MenuBuilder.MenuCount>();
+                foreach (var m in menus)
+                {
+                    if (m.Items > FatalThreshold) fatal.Add(m);
+                    else if (m.Items > WarnThreshold) warn.Add(m);
+                }
+
+                var sorted = new List<MenuBuilder.MenuCount>(menus);
+                sorted.Sort(delegate (MenuBuilder.MenuCount a, MenuBuilder.MenuCount b)
+                {
+                    int c = b.Items.CompareTo(a.Items);
+                    return c != 0 ? c : string.Compare(a.Path, b.Path, StringComparison.Ordinal);
+                });
+
+                sb.AppendLine("  配置    : " + Path.GetFullPath(confPath));
+                sb.AppendLine("  时间    : " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                sb.AppendLine("  分组数  : " + p.Groups.Count + "   条目行: " + rowCount + "（不含分隔线）");
+                sb.AppendLine("  阈值    : 单菜单 >" + WarnThreshold + " 项 = WARN；>"
+                    + FatalThreshold + " 项 = fatal（exit=3）");
+                sb.AppendLine("  口径    : 与 MenuBuilder 同一分栈（Level 父子 / 分隔符不占项 / 空壳子树跳过）；"
+                    + "不展开 open sub 目录");
+                sb.AppendLine();
+                sb.AppendLine("[菜单项数 Top " + TopN + "]（降序，共 " + menus.Count + " 个菜单）");
+                for (int i = 0; i < sorted.Count && i < TopN; i++)
+                {
+                    var m = sorted[i];
+                    sb.AppendLine(string.Format("  {0,2}) {1,6} 项  {2,-6} {3}",
+                        i + 1, m.Items, LevelTag(m.Items), m.Path));
+                }
+                if (sorted.Count > TopN)
+                    sb.AppendLine("  … 其余 " + (sorted.Count - TopN) + " 个菜单省略（超限清单不受 Top "
+                        + TopN + " 限制）");
+
+                sb.AppendLine();
+                sb.AppendLine("[超限清单]");
+                if (fatal.Count + warn.Count == 0)
+                {
+                    sb.AppendLine("  （无：所有菜单都 ≤ " + WarnThreshold + " 项）");
+                }
+                else
+                {
+                    foreach (var m in fatal)
+                        sb.AppendLine("  FATAL  " + m.Path + " = " + m.Items + " 项（> " + FatalThreshold
+                            + "，弹菜单会被截断或整盘失败）");
+                    foreach (var m in warn)
+                        sb.AppendLine("  WARN   " + m.Path + " = " + m.Items + " 项（> " + WarnThreshold
+                            + "，接近上限，建议拆组）");
+                }
+
+                sb.AppendLine();
+                if (fatal.Count > 0)
+                    sb.AppendLine("结果: fatal " + fatal.Count + " 项 ⇒ exit=3（必须先拆组/瘦身）");
+                else if (warn.Count > 0)
+                    sb.AppendLine("结果: 仅 WARN " + warn.Count + " 项 ⇒ exit=0（能弹，但已在危险区）");
+                else
+                    sb.AppendLine("结果: 全部正常 ⇒ exit=0");
+
+                report = sb.ToString();
+                return fatal.Count > 0 ? 3 : 0;
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("  异常：" + ex.GetType().Name + ": " + ex.Message);
+                sb.AppendLine("结果: 无法预检 ✗（exit=2）");
+                report = sb.ToString();
+                return 2;
+            }
+        }
+
+        private static string LevelTag(int items)
+        {
+            if (items > FatalThreshold) return "FATAL";
+            if (items > WarnThreshold) return "WARN";
+            return "";
+        }
+
+        private static void WriteText(string path, string text)
+        {
+            try
+            {
+                string dir = Path.GetDirectoryName(Path.GetFullPath(path));
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                File.WriteAllText(path, text, new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        // ============================================================
+        // --selftest-checkconf：预检 + 与 Build 同构 + 降级重建（A2）的自检
+        // ============================================================
+
+        public static int SelfTestRun(string[] args)
+        {
+            if (args == null || args.Length < 3) return 2;
+
+            string confOrRoot = args[1];
+            string outPath = args[2];
+            var sb = new StringBuilder();
+            int fails = 0;
+
+            sb.AppendLine("=== 配置预检自检（--selftest-checkconf）===");
+            sb.AppendLine("  时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+
+            string liveConf = Directory.Exists(confOrRoot)
+                ? Path.Combine(confOrRoot, "config", "menus.conf")
+                : confOrRoot;
+            sb.AppendLine("  现役配置: " + liveConf);
+
+            string tmpRoot = Path.Combine(Path.GetTempPath(),
+                "runever-checkconf-" + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                // ---- ① 现役配置：exit=0，无 fatal ----
+                string rep;
+                int rc = Evaluate(liveConf, out rep);
+                bool ok1 = rc == 0;
+                if (!ok1) fails++;
+                sb.AppendLine((ok1 ? "[OK]   " : "[FAIL] ")
+                    + "① 现役配置预检 exit=" + rc + "（期望 0）  " + FirstFatalLine(rep));
+
+                // ---- ② 单菜单 2000 项 ⇒ exit=3，且点名该菜单与项数 ----
+                string bigConf = WriteConf(tmpRoot, "big", BuildBigConf("巨量菜单", 2000));
+                rc = Evaluate(bigConf, out rep);
+                bool ok2 = rc == 3
+                        && rep.IndexOf("巨量菜单", StringComparison.Ordinal) >= 0
+                        && rep.IndexOf("2000", StringComparison.Ordinal) >= 0
+                        && rep.IndexOf("FATAL", StringComparison.Ordinal) >= 0;
+                if (!ok2) fails++;
+                sb.AppendLine((ok2 ? "[OK]   " : "[FAIL] ")
+                    + "② 单菜单 2000 项: exit=" + rc + "（期望 3）  点名含「巨量菜单」+2000+FATAL="
+                    + (rep.IndexOf("巨量菜单", StringComparison.Ordinal) >= 0)
+                    + "/" + (rep.IndexOf("2000", StringComparison.Ordinal) >= 0)
+                    + "/" + (rep.IndexOf("FATAL", StringComparison.Ordinal) >= 0));
+
+                // ---- ③ 单菜单 950 项 ⇒ 只 WARN、exit=0（阈值分界：>900 才告警）----
+                string warnConf = WriteConf(tmpRoot, "warn", BuildBigConf("临界菜单", 950));
+                rc = Evaluate(warnConf, out rep);
+                bool ok3 = rc == 0
+                        && rep.IndexOf("WARN", StringComparison.Ordinal) >= 0
+                        && rep.IndexOf("临界菜单", StringComparison.Ordinal) >= 0;
+                if (!ok3) fails++;
+                sb.AppendLine((ok3 ? "[OK]   " : "[FAIL] ")
+                    + "③ 单菜单 950 项: exit=" + rc + "（期望 0）  报告标 WARN="
+                    + (rep.IndexOf("WARN", StringComparison.Ordinal) >= 0));
+
+                // ---- ④ 与 Build 同构：计数 == 真实菜单行数（root + 每个容器子菜单）----
+                var p = new ConfParser(liveConf);
+                p.Parse();
+                var counted = MenuBuilder.CountPerMenu(p.Groups);
+                var built = MenuBuilder.Build(p.Groups, null);
+                bool ok4;
+                string detail4;
+                try
+                {
+                    int rootRows = CountRows(built.Menu);
+                    int subChecked = 0, subOk = 0;
+                    var mism = new StringBuilder();
+
+                    for (int i = 0; i < built.Menu.Count(); i++)
+                    {
+                        IntPtr sh = built.Menu.GetSubMenuHandle(i);
+                        if (sh == IntPtr.Zero) continue;
+
+                        string title = built.Menu.GetItemText(i).Replace("&", "");
+                        int tab = title.IndexOf('\t');
+                        if (tab >= 0) title = title.Substring(0, tab);
+                        title = title.Trim();
+
+                        var node = FindBySuffix(counted, " / " + title);
+                        if (node == null) continue;
+
+                        int rows = CountRows(NativeMenu.FromHandle(sh));
+                        subChecked++;
+                        if (rows == node.Items) subOk++;
+                        else mism.Append(" [" + title + " 计数=" + node.Items + " 实建=" + rows + "]");
+                    }
+
+                    ok4 = (rootRows == counted[0].Items) && subChecked >= 1 && subOk == subChecked;
+                    detail4 = "root 计数=" + counted[0].Items + " 实建行=" + rootRows
+                        + "；子菜单 " + subOk + "/" + subChecked + " 一致" + mism;
+                }
+                finally
+                {
+                    built.Menu.Dispose();
+                }
+                if (!ok4) fails++;
+                sb.AppendLine((ok4 ? "[OK]   " : "[FAIL] ") + "④ 计数与 Build 同构: " + detail4);
+
+                // ---- ⑤ 分隔线不占有效项 ----
+                string sepConf = WriteConf(tmpRoot, "sep",
+                    "! 分隔线 always" + Environment.NewLine
+                    + "  甲  _A  | run  a.exe" + Environment.NewLine
+                    + "  ---" + Environment.NewLine
+                    + "  乙  _B  | run  b.exe" + Environment.NewLine);
+                var sepParser = new ConfParser(sepConf);
+                sepParser.Parse();
+                var sepCounted = MenuBuilder.CountPerMenu(sepParser.Groups);
+                bool ok5 = sepCounted.Count == 1 && sepCounted[0].Items == 2;
+                if (!ok5) fails++;
+                sb.AppendLine((ok5 ? "[OK]   " : "[FAIL] ")
+                    + "⑤ 分隔线不占项: root 计数=" + sepCounted[0].Items + "（期望 2，配置含 1 条 ---）");
+
+                // ---- ⑥ A2：内存构造单菜单 2000 项 ⇒ Build 不抛、可点条目>0、日志含「已截断」----
+                var logLines = new List<string>();
+                Action<string> oldSink = MenuBuilder.LogSink;
+                int bigTotal = 0;
+                string note = "";
+                string err = null;
+                bool ok6 = false;
+                try
+                {
+                    MenuBuilder.LogSink = s => logLines.Add(s);
+                    var bigGroups = new List<MenuGroup> { MakeBigGroup("巨量内存", 2000) };
+                    var bigBuilt = MenuBuilder.Build(bigGroups, null);
+                    try
+                    {
+                        bigTotal = bigBuilt.ItemCount;
+                        note = bigBuilt.TruncationNote ?? "";
+                        bool logged = false;
+                        foreach (string l in logLines)
+                            if (l.IndexOf("已截断", StringComparison.Ordinal) >= 0) logged = true;
+                        ok6 = bigTotal > 0 && note.IndexOf("已截断", StringComparison.Ordinal) >= 0
+                           && logged && bigBuilt.Menu.Count() > 0
+                           && bigTotal < 2000;
+                        if (!ok6)
+                            err = "total=" + bigTotal + " note=[" + note + "] 日志条数=" + logLines.Count;
+                    }
+                    finally
+                    {
+                        bigBuilt.Menu.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    err = ex.GetType().Name + ": " + ex.Message + " @" + FirstStackLine(ex);
+                    ok6 = false;
+                }
+                finally
+                {
+                    MenuBuilder.LogSink = oldSink;
+                }
+                if (!ok6) fails++;
+                sb.AppendLine((ok6 ? "[OK]   " : "[FAIL] ")
+                    + "⑥ 降级重建（2000 项）: 不抛=" + (err == null)
+                    + " 可点条目=" + bigTotal + "（期望 >0 且 <2000）"
+                    + " 日志含「已截断」=" + (note.IndexOf("已截断", StringComparison.Ordinal) >= 0)
+                    + (err != null ? "  异常/明细: " + err : ""));
+                if (note.Length > 0) sb.AppendLine("       日志: " + note);
+
+                // ---- ⑦ A2：截断是「每个菜单各自」的，不是整张配置砍一半 ----
+                //   两个 2000 项容器 ⇒ 降级后**两个**子菜单各 1000 行（总数 ≈2000），
+                //   若实现成"全局只留 1000"就会有一个容器变成空的。
+                int sub1 = -1, sub2 = -1, total7 = 0;
+                string err7 = null;
+                bool ok7 = false;
+                try
+                {
+                    var two = new List<MenuGroup> { MakeTwoBigGroup("容器甲", "容器乙", 2000) };
+                    var b7 = MenuBuilder.Build(two, null);
+                    try
+                    {
+                        total7 = b7.ItemCount;
+                        int rootRows7 = CountRows(b7.Menu);
+                        for (int i = 0; i < b7.Menu.Count(); i++)
+                        {
+                            IntPtr sh = b7.Menu.GetSubMenuHandle(i);
+                            if (sh == IntPtr.Zero) continue;
+                            int rows = CountRows(NativeMenu.FromHandle(sh));
+                            if (sub1 < 0) sub1 = rows; else sub2 = rows;
+                        }
+                        ok7 = rootRows7 == 2 && sub1 == MenuBuilder.DegradeFirstLimit
+                           && sub2 == MenuBuilder.DegradeFirstLimit
+                           && total7 == MenuBuilder.DegradeFirstLimit * 2;
+                        if (!ok7)
+                            err7 = "root行=" + rootRows7 + " 子菜单=" + sub1 + "/" + sub2
+                                 + " total=" + total7;
+                    }
+                    finally
+                    {
+                        b7.Menu.Dispose();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    err7 = ex.GetType().Name + ": " + ex.Message;
+                }
+                if (!ok7) fails++;
+                sb.AppendLine((ok7 ? "[OK]   " : "[FAIL] ")
+                    + "⑦ 每菜单各自截断（2×2000 项）: 子菜单=" + sub1 + "/" + sub2
+                    + "（期望各 " + MenuBuilder.DegradeFirstLimit + "） 可点条目合计=" + total7
+                    + (err7 != null ? "  明细: " + err7 : ""));
+
+                // ---- ⑧ 顶格条目（Level=0）不再崩：预检能数、构建能出菜单 ----
+                //   手写配置里"第一列直接写条目"是常态；旧分栈会连 root 一起弹掉 ⇒ 越界崩。
+                var l0 = new StringBuilder();
+                l0.AppendLine("! 顶格 always");
+                for (int i = 1; i <= 2000; i++) l0.AppendLine("顶" + i + "  | run  y" + i + ".exe");
+                string l0Conf = WriteConf(tmpRoot, "level0", l0.ToString());
+
+                string repL0;
+                int rcL0 = Evaluate(l0Conf, out repL0);
+
+                int l0Total = 0;
+                bool l0Threw = false;
+                var gL0 = new MenuGroup { Name = "顶格", Type = GroupType.Always };
+                for (int i = 1; i <= 2000; i++)
+                    gL0.Items.Add(new MenuItem { Title = "顶" + i, Type = ActionType.Run, Target = "y" + i + ".exe", Level = 0 });
+                try
+                {
+                    var bL0 = MenuBuilder.Build(new List<MenuGroup> { gL0 });
+                    try { l0Total = bL0.ItemCount; }
+                    finally { bL0.Menu.Dispose(); }
+                }
+                catch { l0Threw = true; }
+
+                bool ok8 = rcL0 == 3 && repL0.IndexOf("2000", StringComparison.Ordinal) >= 0
+                        && !l0Threw && l0Total > 0;
+                if (!ok8) fails++;
+                sb.AppendLine((ok8 ? "[OK]   " : "[FAIL] ")
+                    + "⑧ 顶格条目(Level=0) 2000 项: 预检 exit=" + rcL0 + "（期望 3）"
+                    + " 构建抛异常=" + l0Threw + " 可点条目=" + l0Total + "（期望 >0，截断到 "
+                    + MenuBuilder.DegradeFirstLimit + "）");
+
+                sb.AppendLine();
+                sb.AppendLine("结果: " + (fails == 0 ? "全部通过 ✓" : "失败 " + fails + " 项 ✗"));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("异常: " + ex.GetType().Name + ": " + ex.Message);
+                sb.AppendLine(ex.StackTrace);
+                sb.AppendLine();
+                sb.AppendLine("结果: 失败（异常） ✗");
+                fails++;
+            }
+            finally
+            {
+                try { if (Directory.Exists(tmpRoot)) Directory.Delete(tmpRoot, true); } catch { }
+            }
+
+            WriteText(outPath, sb.ToString());
+            return fails == 0 ? 0 : 1;
+        }
+
+        /// <summary>异常栈顶一行（自检报告里定位用；不整段铺开）。</summary>
+        private static string FirstStackLine(Exception ex)
+        {
+            if (ex == null || string.IsNullOrEmpty(ex.StackTrace)) return "";
+            foreach (string raw in ex.StackTrace.Replace("\r\n", "\n").Split('\n'))
+            {
+                string l = raw.Trim();
+                if (l.Length > 0) return l;
+            }
+            return "";
+        }
+
+        /// <summary>统计一个菜单的**有效行**数（不含分隔线：Win32 里分隔线的命令 ID = 0）。</summary>
+        private static int CountRows(NativeMenu menu)
+        {
+            int n = 0;
+            int c = menu.Count();
+            for (int i = 0; i < c; i++)
+                if (menu.GetItemIdAt(i) != 0) n++;
+            return n;
+        }
+
+        private static MenuBuilder.MenuCount FindBySuffix(List<MenuBuilder.MenuCount> list, string suffix)
+        {
+            foreach (var m in list)
+                if (m.Path.EndsWith(suffix, StringComparison.Ordinal)) return m;
+            return null;
+        }
+
+        private static string FirstFatalLine(string report)
+        {
+            foreach (string raw in (report ?? "").Replace("\r\n", "\n").Split('\n'))
+            {
+                string l = raw.Trim();
+                if (l.StartsWith("FATAL", StringComparison.Ordinal)) return "首个超限: " + l;
+            }
+            return "";
+        }
+
+        /// <summary>写一份临时菜单配置（沙箱，绝不碰真实配置）。</summary>
+        private static string WriteConf(string rootDir, string name, string text)
+        {
+            string dir = Path.Combine(rootDir, name, "config");
+            Directory.CreateDirectory(dir);
+            string path = Path.Combine(dir, "menus.conf");
+            File.WriteAllText(path, text, new UTF8Encoding(false));
+            return path;
+        }
+
+        /// <summary>夹具：一个容器子菜单里塞 <paramref name="count"/> 条叶项（写在 level 1/2）。</summary>
+        private static string BuildBigConf(string menuTitle, int count)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("! 规模 always");
+            sb.AppendLine("  " + menuTitle + "  _G  | group");
+            for (int i = 1; i <= count; i++)
+                sb.AppendLine("    项" + i + "  | run  x" + i + ".exe");
+            return sb.ToString();
+        }
+
+        /// <summary>夹具：同组里两个容器，各塞 <paramref name="count"/> 条子项（层级形状同上）。</summary>
+        private static MenuGroup MakeTwoBigGroup(string titleA, string titleB, int count)
+        {
+            var g = new MenuGroup { Name = "规模2", Type = GroupType.Always };
+            g.Items.Add(new MenuItem { Title = titleA, Type = ActionType.Group, Level = 1 });
+            for (int i = 1; i <= count; i++)
+                g.Items.Add(new MenuItem { Title = "甲" + i, Type = ActionType.Run, Target = "a" + i + ".exe", Level = 2 });
+            g.Items.Add(new MenuItem { Title = titleB, Type = ActionType.Group, Level = 1 });
+            for (int i = 1; i <= count; i++)
+                g.Items.Add(new MenuItem { Title = "乙" + i, Type = ActionType.Run, Target = "b" + i + ".exe", Level = 2 });
+            return g;
+        }
+
+        /// <summary>夹具：内存里的 2000 项分组（不落盘，避免碰真实配置）。</summary>
+        /// ★ 层级形状照抄现役配置的容器（标题 Level=1、子项 Level=2）—— 分栈语义只认这一种
+        ///   「同组里 level 0 是叶、容器在 level ≥1」的形状（既有不变式，本卡不动）。
+        /// </summary>
+        private static MenuGroup MakeBigGroup(string menuTitle, int count)
+        {
+            var g = new MenuGroup { Name = "规模", Type = GroupType.Always };
+            g.Items.Add(new MenuItem
+            {
+                Title = menuTitle,
+                Hotkey = "",
+                Type = ActionType.Group,
+                Level = 1
+            });
+            for (int i = 1; i <= count; i++)
+            {
+                g.Items.Add(new MenuItem
+                {
+                    Title = "项" + i,
+                    Type = ActionType.Run,
+                    Target = "x" + i + ".exe",
+                    Level = 2
+                });
+            }
+            return g;
         }
     }
 }

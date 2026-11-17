@@ -164,9 +164,8 @@ namespace RunEverCs.Views
             // ★ 2026-11-09（U1）：四个文件夹子菜单键 + 批量执行上限，界面先立好，
             //   渲染/解析/执行三处的实现在各自的卡里接（open sub / 批量执行）。
             sp.Children.Add(SettingsKit.Card(
-                SettingsKit.Toggle("文件夹条目展开为子菜单",
-                    "open 指向目录的条目（含 open sub）在弹菜单时当场枚举目录生成子菜单；目录空/无权限则不会展开",
-                    GetBool("submenuEnabled", false), v => SetBool("submenuEnabled", v)),
+                // ★ 2026-11-17：全局闸门「文件夹条目展开为子菜单」已取消（只有显式 open sub 才展开），
+                //   对应开关一并移除；旧 auto.conf 里的 submenuEnabled 仍可读但不再生效。
                 SettingsKit.Text("子菜单最多几项",
                     "超出部分截断，防止大目录把菜单撑爆",
                     Get("submenuLimit", "20"), v => SetInt("submenuLimit", PInt(v, 20)), 90),

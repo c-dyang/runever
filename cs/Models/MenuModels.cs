@@ -58,6 +58,16 @@ namespace RunEverCs.Models
         /// </summary>
         public bool Sub { get; set; }
 
+        /// <summary>
+        /// `off` 修饰位（卡 E / 2026-11-17b）：条目**临时禁用** —— 配置不删，菜单里照常出现但灰显、点了不执行。
+        /// ★ 与 <see cref="Sub"/> / <see cref="Flag"/> 正交的第三个轴：
+        ///   Flag 管执行窗口、Sub 管菜单形态、Off 管"这一条能不能点"。
+        /// ★ 与 `hideMissing`（缺件隐藏）不同：那个是"看不到"，这个是"看得到但点不动"，两者互不影响。
+        /// ★ 必须是 MenuItem 的字段（而不是旁挂表）：缺件隐藏 / 树形编辑都会 `Clone()` 条目，
+        ///   旁挂状态会在克隆时丢 ⇒ `off` 悄悄失效（条目又能点了）。
+        /// </summary>
+        public bool Off { get; set; }
+
         public string Target { get; set; } = "";
 
         /// <summary>缩进层级（0 = 顶层）。</summary>
@@ -83,6 +93,7 @@ namespace RunEverCs.Models
                 Type = Type,
                 Flag = Flag,
                 Sub = Sub,
+                Off = Off,
                 Target = Target,
                 Level = Level,
                 Line = Line,
